@@ -62,9 +62,12 @@ class RelativeGlobalAttention(torch.nn.Module):
         self.Wv = torch.nn.Linear(self.d, self.d)
         self.fc = torch.nn.Linear(d, d)
         self.additional = add_emb
-        self.E = torch.randn([self.max_seq, int(self.dh)], requires_grad=False)
-        # print(self.E.shape)
-        # self.E = torch.nn.Parameter(torch.zeros([self.max_seq, int(self.dh)]))
+        self.max_relative_distance = self.max_seq // 2      # TODO: parameterize this
+
+        # prepare E
+        self.E = torch.randn([self.max_relative_distance, int(self.dh)], requires_grad=False)
+        self.E = F.pad(input=self.E, pad=(0, 0, self.max_seq - self.max_relative_distance, 0),
+                        mode='constant', value=0)
         if self.additional:
             self.Radd = None
 
@@ -103,9 +106,6 @@ class RelativeGlobalAttention(torch.nn.Module):
         logits = QKt + Srel
         logits = logits / math.sqrt(self.dh)
 
-        print("logits", logits.shape)
-        print("mask", mask.shape)
-
         if mask is not None:
             logits += (mask.to(torch.int64) * -1e9).to(logits.dtype)
 
@@ -119,7 +119,7 @@ class RelativeGlobalAttention(torch.nn.Module):
         return out, attention_weights
 
     def _get_left_embedding(self, len_q, len_k):
-        starting_point = max(0,self.max_seq-len_q)
+        starting_point = max(0, self.max_seq // 2 - len_q)
         e = self.E[starting_point:,:]
         return e
 
@@ -172,15 +172,15 @@ class EncoderLayer(torch.nn.Module):
 
 
 class DecoderLayer(torch.nn.Module):
-    def __init__(self, d_model, rate=0.1, h=16, additional=False, max_seq=2048):
+    def __init__(self, d_model, rate=0.1, h=16, additional=False, max_seq=2048, filter_size=2048):
         super(DecoderLayer, self).__init__()
 
         self.d_model = d_model
         self.rga2 = RelativeGlobalAttention(d=d_model, h=h, max_seq=max_seq, add_emb=additional)
         self.rga = RelativeGlobalAttention(d=d_model, h=h, max_seq=max_seq, add_emb=additional)
 
-        self.FFN_pre = torch.nn.Linear(self.d_model, self.d_model // 2)
-        self.FFN_suf = torch.nn.Linear(self.d_model // 2, self.d_model)
+        self.FFN_pre = torch.nn.Linear(self.d_model, filter_size)
+        self.FFN_suf = torch.nn.Linear(filter_size, self.d_model)
 
         self.layernorm1 = torch.nn.LayerNorm(self.d_model, eps=1e-6)
         self.layernorm2 = torch.nn.LayerNorm(self.d_model, eps=1e-6)
@@ -243,7 +243,8 @@ class Encoder(torch.nn.Module):
 
 
 class Decoder(torch.nn.Module):
-    def __init__(self, num_layers, d_model, input_vocab_size, rate=0.1, max_len=None):
+    def __init__(self, num_layers, d_model, input_vocab_size, rate=0.1, max_len=None,
+                filter_size=2048):
         super(Decoder, self).__init__()
 
         self.d_model = d_model
@@ -254,7 +255,8 @@ class Decoder(torch.nn.Module):
             self.pos_encoding = DynamicPositionEmbedding(self.d_model, max_seq=max_len)
 
         self.dec_layers = torch.nn.ModuleList(
-            [DecoderLayer(d_model, rate, h=self.d_model // 64, additional=False, max_seq=max_len)
+            [DecoderLayer(d_model, rate, h=self.d_model // 64, additional=False, max_seq=max_len,
+                            filter_size=filter_size)
              for _ in range(num_layers)])
         self.dropout = torch.nn.Dropout(rate)
     

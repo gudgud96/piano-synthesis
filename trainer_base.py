@@ -10,18 +10,16 @@ import datetime
 from sklearn.metrics import accuracy_score
 import torch.nn.functional as F
 import numpy as np
-import time
 
 
 # ============ DATA PREPARATION ============ #
 class CustomSchedule:
-    def __init__(self, d_model, warmup_steps=4000, optimizer=None, name="noam"):
+    def __init__(self, d_model, warmup_steps=4000, optimizer=None):
         super(CustomSchedule, self).__init__()
 
         self.d_model = d_model
         self.optimizer = optimizer
         self.warmup_steps = warmup_steps
-        self.name = name
 
         self._step = 0
         self._rate = 0
@@ -38,17 +36,10 @@ class CustomSchedule:
     def rate(self, step=None):
         if step is None:
             step = self._step
-        
-        if self.name == "noam":
-            arg1 = step ** (-0.5)
-            arg2 = step * (self.warmup_steps ** -1.5)
-            return self.d_model ** (-0.5) * min(arg1, arg2)
-        
-        elif self.name == "rsqrt_decay":
-            return 0.1 * (max(step, self.warmup_steps) ** (-0.5))
-        
-        else:
-            print("Unknown optimizer name")
+        arg1 = step ** (-0.5)
+        arg2 = step * (self.warmup_steps ** -1.5)
+
+        return self.d_model ** (-0.5) * min(arg1, arg2)
 
     def state_dict(self):
         return {
@@ -64,29 +55,27 @@ class CustomSchedule:
 # hyperparameters
 with open('model_config.json') as f:
     args = json.load(f)
-if not os.path.isdir('params'):
-    os.mkdir('params')
+if not os.path.isdir('params-base'):
+    os.mkdir('params-base')
 if not os.path.isdir('logs'):
     os.mkdir('logs')
-save_path = 'params/{}.pt'.format(args['name'])
+save_path = 'params-base/{}.pt'.format(args['name'])
 
 # model
-version = 6
-model = MusicTransformerVAE(embedding_dim=args["hidden_dim"], 
+step = 157000
+model = TransformerVAE(embedding_dim=args["hidden_dim"], 
                             vocab_size=388+2, 
                             num_layer=args["num_layer"],
                             max_seq=args["max_seq"], 
-                            dropout=args["dropout"],
-                            filter_size=args["filter_size"])
-# model = torch.load("params-10042020//transformer-vae-{}.pt".format(version))
-# model.cuda()
+                            dropout=args["dropout"])
+# model = torch.load("params/transformer-vae-{}.pt".format(step))
+model.cuda()
 
 optimizer = optim.Adam(model.parameters(), lr=args['lr'], betas=(0.9, 0.98), eps=1e-9)
-scheduler = CustomSchedule(args["hidden_dim"], optimizer=optimizer, warmup_steps=8000,
-                            name="noam")
+scheduler = CustomSchedule(args["hidden_dim"], optimizer=optimizer, warmup_steps=8000)
 
-# optimizer.load_state_dict(torch.load("params-10042020//opt-{}.pt".format(version)))
-# scheduler.load_state_dict(torch.load("params-10042020//scheduler-{}.pt".format(version)))
+# optimizer.load_state_dict(torch.load("params/opt-{}.pt".format(step)))
+# scheduler.load_state_dict(torch.load("params/scheduler-{}.pt".format(step)))
 
 
 if torch.cuda.is_available():
@@ -94,13 +83,6 @@ if torch.cuda.is_available():
     model.cuda()
 else:
     print('CPU mode')
-
-# multi-GPU set
-# if torch.cuda.device_count() > 1:
-#     single_model = model
-#     model = torch.nn.DataParallel(model, output_device=torch.cuda.device_count()-1)
-
-single_model = model
 
 step, pre_epoch = 0, 0
 batch_size = args["batch_size"]
@@ -150,7 +132,6 @@ def training_phase(model, optimizer, scheduler):
             print(j, "/", len_dl, end="\r")
             performance_tokens = x
             performance_tokens = performance_tokens.cuda().long()
-            # performance_tokens = performance_tokens.cuda(model.output_device).long()
             # melody_tokens = melody_tokens.cuda().long()
 
             optimizer.zero_grad()
@@ -164,7 +145,7 @@ def training_phase(model, optimizer, scheduler):
             acc = accuracy_score(performance_tokens_padded.view(-1).cpu().detach().numpy(),
                                 torch.argmax(out, dim=-1).view(-1).cpu().detach().numpy())
 
-            print(step, loss.item(), acc, end="\r")
+            print(loss.item(), acc, end="\r")
             
             loss.backward()
             scheduler.step()
@@ -177,23 +158,22 @@ def training_phase(model, optimizer, scheduler):
 
             if step % 250 == 0:
 
-                print("Saving model", "params/transformer-vae-{}.pt".format(version))
+                print("Saving model", "params-base/transformer-base-vae-{}.pt".format(step))
                 # for model, save the whole thing
-                torch.save(single_model, "params/transformer-vae-{}.pt".format(version))
-                torch.save(optimizer.state_dict(), "params/opt-{}.pt".format(version))
-                torch.save(scheduler.state_dict(), "params/scheduler-{}.pt".format(version))
+                torch.save(model, "params-base/transformer-base--vae-{}.pt".format(step))
+                torch.save(optimizer.state_dict(), "params-base/opt-base--{}.pt".format(step))
+                torch.save(scheduler.state_dict(), "params-base/scheduler-base-{}.pt".format(step))
                 
                 print("Evaluation...")
-                single_model.eval()
+                model.eval()
 
                 # evaluate on vgmidi
                 for j, x in tqdm(enumerate(val_dl_dist), total=len(val_dl_dist)):
                     
                     performance_tokens = x
                     performance_tokens = performance_tokens.cuda().long()
-                    # performance_tokens = performance_tokens.cuda(model.output_device).long()
 
-                    out = single_model(performance_tokens)
+                    out = model(performance_tokens)
 
                     performance_tokens_padded = F.pad(input=performance_tokens, 
                                                     pad=(0, 1, 0, 0), mode='constant', value=1)
@@ -218,12 +198,6 @@ def training_phase(model, optimizer, scheduler):
             
             step += 1
             model.train()
-        
-        # switch output device to: gpu-1 ~ gpu-n
-        # sw_start = time.time()
-        # model.output_device = i % (torch.cuda.device_count() -1) + 1
-        # sw_end = time.time()
-        # print('output switch time: {}'.format(sw_end - sw_start) )
         
         # print('batch loss: {:.5f}  {:.5f}'.format(batch_loss / len(train_dl_dist),
         #                                           test_loss / len(val_dl_dist)))
@@ -253,13 +227,15 @@ def evaluation_phase(model, optimizer, scheduler):
             acc = accuracy_score(performance_tokens_padded.view(-1).cpu().detach().numpy(),
                                 torch.argmax(out, dim=-1).view(-1).cpu().detach().numpy())
             
+            print(loss.item(), acc)
+
             test_loss += loss.item()
             test_acc += acc
         
         print('evaluate loss: {:.5f}'.format(test_loss / len(dl)))
         print('evaluate acc: {:.5f}'.format(test_acc / len(dl)))
     
-    run(test_dl_dist)
+    # run(test_dl_dist)
     # run(train_dl_dist)
     run(val_dl_dist)
 

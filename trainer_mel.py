@@ -71,29 +71,29 @@ if not os.path.isdir('logs'):
 save_path = 'params/{}.pt'.format(args['name'])
 
 # model
-version = 6
-model = MusicTransformerVAE(embedding_dim=args["hidden_dim"], 
+version = 2
+model = MelodyMusicTransformerVAE(embedding_dim=args["hidden_dim"], 
                             vocab_size=388+2, 
                             num_layer=args["num_layer"],
                             max_seq=args["max_seq"], 
                             dropout=args["dropout"],
                             filter_size=args["filter_size"])
-# model = torch.load("params-10042020//transformer-vae-{}.pt".format(version))
-# model.cuda()
+# model = torch.load("params/mel-transformer-vae-{}.pt".format(version))
+model.cuda()
 
 optimizer = optim.Adam(model.parameters(), lr=args['lr'], betas=(0.9, 0.98), eps=1e-9)
 scheduler = CustomSchedule(args["hidden_dim"], optimizer=optimizer, warmup_steps=8000,
                             name="noam")
 
-# optimizer.load_state_dict(torch.load("params-10042020//opt-{}.pt".format(version)))
-# scheduler.load_state_dict(torch.load("params-10042020//scheduler-{}.pt".format(version)))
+# optimizer.load_state_dict(torch.load("params/opt-{}.pt".format(version)))
+# scheduler.load_state_dict(torch.load("params/scheduler-{}.pt".format(version)))
 
 
-if torch.cuda.is_available():
-    print('Using: ', torch.cuda.get_device_name(torch.cuda.current_device()))
-    model.cuda()
-else:
-    print('CPU mode')
+# if torch.cuda.is_available():
+#     print('Using: ', torch.cuda.get_device_name(torch.cuda.current_device()))
+#     model.cuda()
+# else:
+#     print('CPU mode')
 
 # multi-GPU set
 # if torch.cuda.device_count() > 1:
@@ -109,13 +109,12 @@ model.train()
 # dataloaders
 is_shuffle = True
 filenames = get_paths()
-train_ds_dist = MaestroDataset(filenames, mode="train")
+train_ds_dist = MaestroDataset(filenames, mode="train", is_mel=True)
 train_dl_dist = DataLoader(train_ds_dist, batch_size=args["batch_size"], shuffle=is_shuffle, num_workers=0)
-val_ds_dist = MaestroDataset(filenames, mode="val")
+val_ds_dist = MaestroDataset(filenames, mode="val", is_mel=True)
 val_dl_dist = DataLoader(val_ds_dist, batch_size=args["batch_size"], shuffle=False, num_workers=0)
-test_ds_dist = MaestroDataset(filenames, mode="test")
+test_ds_dist = MaestroDataset(filenames, mode="test", is_mel=True)
 test_dl_dist = DataLoader(test_ds_dist, batch_size=args["batch_size"], shuffle=is_shuffle, num_workers=0)
-dl = train_dl_dist
 print(len(train_ds_dist), len(val_ds_dist), len(test_ds_dist))
 
 # define tensorboard writer
@@ -148,13 +147,12 @@ def training_phase(model, optimizer, scheduler):
         for j, x in enumerate(train_dl_dist):
 
             print(j, "/", len_dl, end="\r")
-            performance_tokens = x
+            performance_tokens, mel_tokens = x
             performance_tokens = performance_tokens.cuda().long()
-            # performance_tokens = performance_tokens.cuda(model.output_device).long()
-            # melody_tokens = melody_tokens.cuda().long()
+            mel_tokens = mel_tokens.cuda().long()
 
             optimizer.zero_grad()
-            out = model(performance_tokens)
+            out = model(performance_tokens, mel_tokens)
 
             performance_tokens_padded = F.pad(input=performance_tokens, 
                                               pad=(0, 1, 0, 0), mode='constant', value=1) 
@@ -177,11 +175,11 @@ def training_phase(model, optimizer, scheduler):
 
             if step % 250 == 0:
 
-                print("Saving model", "params/transformer-vae-{}.pt".format(version))
+                print("Saving model", "params/mel-transformer-vae-{}.pt".format(version))
                 # for model, save the whole thing
-                torch.save(single_model, "params/transformer-vae-{}.pt".format(version))
-                torch.save(optimizer.state_dict(), "params/opt-{}.pt".format(version))
-                torch.save(scheduler.state_dict(), "params/scheduler-{}.pt".format(version))
+                torch.save(single_model, "params/mel-transformer-vae-{}.pt".format(version))
+                torch.save(optimizer.state_dict(), "params/mel-opt-{}.pt".format(version))
+                torch.save(scheduler.state_dict(), "params/mel-scheduler-{}.pt".format(version))
                 
                 print("Evaluation...")
                 single_model.eval()
@@ -189,11 +187,11 @@ def training_phase(model, optimizer, scheduler):
                 # evaluate on vgmidi
                 for j, x in tqdm(enumerate(val_dl_dist), total=len(val_dl_dist)):
                     
-                    performance_tokens = x
+                    performance_tokens, mel_tokens = x
                     performance_tokens = performance_tokens.cuda().long()
-                    # performance_tokens = performance_tokens.cuda(model.output_device).long()
+                    mel_tokens = mel_tokens.cuda().long()
 
-                    out = single_model(performance_tokens)
+                    out = single_model(performance_tokens, mel_tokens)
 
                     performance_tokens_padded = F.pad(input=performance_tokens, 
                                                     pad=(0, 1, 0, 0), mode='constant', value=1)
@@ -253,13 +251,15 @@ def evaluation_phase(model, optimizer, scheduler):
             acc = accuracy_score(performance_tokens_padded.view(-1).cpu().detach().numpy(),
                                 torch.argmax(out, dim=-1).view(-1).cpu().detach().numpy())
             
+            print(loss.item(), acc)
+
             test_loss += loss.item()
             test_acc += acc
         
         print('evaluate loss: {:.5f}'.format(test_loss / len(dl)))
         print('evaluate acc: {:.5f}'.format(test_acc / len(dl)))
     
-    run(test_dl_dist)
+    # run(test_dl_dist)
     # run(train_dl_dist)
     run(val_dl_dist)
 
