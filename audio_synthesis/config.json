@@ -1,0 +1,4 @@
+{
+    "name": "piano_tacotron",
+    "epochs": 500
+}
