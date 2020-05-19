@@ -18,8 +18,12 @@ class PianoTacotron(torch.nn.Module):
         super().__init__()
 
         # posterior_net is shared by q_z_u and q_z_s
-        self.posterior_u_enc = LatentEncoder(input_dim=melspec_dim + pr_dim + k_dims)
-        self.posterior_s_enc = LatentEncoder(input_dim=melspec_dim + pr_dim)
+        self.posterior_u_enc = LatentEncoder(input_dim=melspec_dim + pr_dim + k_dims,
+                                            kernel_size=kernel_size,
+                                            stride=stride)
+        self.posterior_s_enc = LatentEncoder(input_dim=melspec_dim + pr_dim,
+                                            kernel_size=kernel_size,
+                                            stride=stride)
         self.posterior_u_mu, self.posterior_u_var = nn.Linear(linear_dims, z_dims), nn.Linear(linear_dims, z_dims)
         self.posterior_s = nn.Linear(linear_dims, k_dims)
         self.gs = GumbelSoftmax(k_dims, k_dims)

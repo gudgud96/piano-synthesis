@@ -18,30 +18,94 @@ if not os.path.isdir('params'):
     os.mkdir('params')
 if not os.path.isdir('logs'):
     os.mkdir('logs')
-save_path = 'params/{}.pt'.format(args['name'])
+save_path = 'params/{}_{}.pt'.format(args['name'], datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
 
 NUM_EMOTIONS = 4
+MELSPEC_DIM = 128
+PR_DIM = 88
 
 # load unlabelled data
 train_ds = MAESTRO(path='/data/MAESTRO', groups=['train'], sequence_length=320000)
-train_dl = DataLoader(train_ds, batch_size=32, shuffle=False, num_workers=0)
+train_dl = DataLoader(train_ds, batch_size=args["batch_size"], shuffle=False, num_workers=0)
 val_ds = MAESTRO(path='/data/MAESTRO', groups=['validation'], sequence_length=320000)
-val_dl = DataLoader(val_ds, batch_size=32, shuffle=False, num_workers=0)
+val_dl = DataLoader(val_ds, batch_size=args["batch_size"], shuffle=False, num_workers=0)
 test_ds = MAESTRO(path='/data/MAESTRO', groups=['test'], sequence_length=320000)
-test_dl = DataLoader(test_ds, batch_size=32, shuffle=False, num_workers=0)
+test_dl = DataLoader(test_ds, batch_size=args["batch_size"], shuffle=False, num_workers=0)
 
 # load emotion labelled data
 emotion_train_ds = MAESTRO(path='/data/MAESTRO', groups=['train_emotion'], sequence_length=320000)
-emotion_train_dl = DataLoader(emotion_train_ds, batch_size=16, shuffle=False, num_workers=0)
+emotion_train_dl = DataLoader(emotion_train_ds, batch_size=args["batch_size"] // 2, shuffle=False, num_workers=0)
 emotion_val_ds = MAESTRO(path='/data/MAESTRO', groups=['validation_emotion'], sequence_length=320000)
-emotion_val_dl = DataLoader(emotion_val_ds, batch_size=16, shuffle=False, num_workers=0)
+emotion_val_dl = DataLoader(emotion_val_ds, batch_size=args["batch_size"] // 2, shuffle=False, num_workers=0)
 emotion_test_ds = MAESTRO(path='/data/MAESTRO', groups=['test_emotion'], sequence_length=320000)
-emotion_test_dl = DataLoader(emotion_test_ds, batch_size=16, shuffle=False, num_workers=0)
+emotion_test_dl = DataLoader(emotion_test_ds, batch_size=args["batch_size"] // 2, shuffle=False, num_workers=0)
+
+# noam scheduler for training transformer
+class CustomSchedule:
+    def __init__(self, d_model, warmup_steps=4000, optimizer=None, name="noam"):
+        super(CustomSchedule, self).__init__()
+
+        self.d_model = d_model
+        self.optimizer = optimizer
+        self.warmup_steps = warmup_steps
+        self.name = name
+
+        self._step = 0
+        self._rate = 0
+
+    def step(self):
+        "Update parameters and rate"
+        self._step += 1
+        rate = self.rate()
+        for p in self.optimizer.param_groups:
+            p['lr'] = rate
+        self._rate = rate
+        self.optimizer.step()
+
+    def rate(self, step=None):
+        if step is None:
+            step = self._step
+        
+        if self.name == "noam":
+            arg1 = step ** (-0.5)
+            arg2 = step * (self.warmup_steps ** -1.5)
+            return self.d_model ** (-0.5) * min(arg1, arg2)
+        
+        elif self.name == "rsqrt_decay":
+            return 0.1 * (max(step, self.warmup_steps) ** (-0.5))
+        
+        else:
+            print("Unknown optimizer name")
+
+    def state_dict(self):
+        return {
+            "steps": self._step,
+            "rate": self._rate
+            }
+    
+    def load_state_dict(self, state_dict):
+        self._step = state_dict["steps"]
+        self._rate = state_dict["rate"]
 
 # load model
-model = PianoTacotron(melspec_dim=128, pr_dim=88)
+model = PianoTacotron(melspec_dim=MELSPEC_DIM, pr_dim=PR_DIM,
+                        prenet_sizes=[256, 128], 
+                        conv_dims=[32, 32, 64, 64, 128, 128],
+                        lstm_dims=args["latent_enc_lstm_dims"], 
+                        linear_dims=args["latent_enc_linear_dims"], 
+                        kernel_size=args["latent_enc_conv_kernel_size"], 
+                        stride=args["latent_enc_conv_stride"], 
+                        t_num_layers=args["transformer_dec_layers"], 
+                        t_dims=args["transformer_model_dim"], 
+                        t_dropout=args["transformer_dropout"], 
+                        t_maxlen=args["transformer_maxlen"],
+                        z_dims=args["z_dims"], 
+                        k_dims=args["num_components"], 
+                        r=args["reduction_factor"])
 model.cuda()
-optimizer = optim.Adam(model.parameters(), lr=0.001)
+optimizer = optim.Adam(model.parameters(), lr=args['lr'], betas=(0.9, 0.98), eps=1e-9)
+scheduler = CustomSchedule(args["transformer_model_dim"], optimizer=optimizer, warmup_steps=8000,
+                            name="noam")
 wav_to_melspec = Spectrogram.MelSpectrogram()
 
 # load writers
@@ -86,6 +150,7 @@ def loss_function(melspec_hat, melspec, z_s_prob, emotion_label, z_u_dist,
 
 def training():
     step_unsup, step_sup = 0, 0
+    learning_rate_counter = 0
     total_epoch = args['epochs']
 
     for ep in range(1, total_epoch):
@@ -107,7 +172,7 @@ def training():
                                                                     is_sup=False)
             
             loss.backward()
-            optimizer.step()
+            scheduler.step()
 
             print("Batch {}/{}: Recon: {:.4} KL: {:.4} Entropy: {:.4}".format(i+1, len(train_dl),
                                                                             recon_loss.item(), 
@@ -118,8 +183,11 @@ def training():
             train_unsup_writer.add_scalar('recon', recon_loss.item(), global_step=step_unsup)
             train_unsup_writer.add_scalar('kl', kl_loss.item(), global_step=step_unsup)
             train_unsup_writer.add_scalar('entropy', entropy_loss.item(), global_step=step_unsup)
+            train_unsup_writer.add_scalar('learning_rate', scheduler.optimizer.param_groups[0]["lr"], 
+                                            global_step=learning_rate_counter)
 
             step_unsup += 1
+            learning_rate_counter +=1
         
         # evaluate unsupervised
         eval_loss, eval_recon_loss, eval_kl_loss, eval_entropy_loss = 0, 0, 0, 0
@@ -167,6 +235,9 @@ def training():
             loss, recon_loss, kl_loss, clf_loss, clf_acc = loss_function(melspec_hat, melspec, z_s_prob, 
                                                                         emotion_label, z_u_dist, 
                                                                         is_sup=True)
+            
+            loss.backward()
+            scheduler.step()
 
             print("Batch {}/{}: Recon: {:.4} KL: {:.4} CLF Loss: {:.4} Acc: {:.4}".format(i+1, 
                                                                                         len(emotion_train_dl),
@@ -179,7 +250,11 @@ def training():
             train_sup_writer.add_scalar('kl', kl_loss.item(), global_step=step_sup)
             train_sup_writer.add_scalar('clf loss', clf_loss.item(), global_step=step_sup)
             train_sup_writer.add_scalar('clf acc', clf_acc, global_step=step_sup)
+            train_unsup_writer.add_scalar('learning_rate', scheduler.optimizer.param_groups[0]["lr"], 
+                                            global_step=learning_rate_counter)
+
             step_sup += 1
+            learning_rate_counter += 1
             
         # evaluate supervised
         eval_loss, eval_recon_loss, eval_kl_loss, eval_clf_loss, eval_clf_acc = 0, 0, 0, 0, 0
@@ -212,7 +287,10 @@ def training():
                                                                                 eval_clf_acc))
         eval_sup_writer.add_scalar('recon', eval_recon_loss, global_step=step_sup)
         eval_sup_writer.add_scalar('kl', eval_kl_loss, global_step=step_sup)
-        eval_sup_writer.add_scalar('clf', eval_clf_loss, global_step=step_sup)
-        eval_sup_writer.add_scalar('acc', eval_clf_acc, global_step=step_sup)
+        eval_sup_writer.add_scalar('clf loss' , eval_clf_loss, global_step=step_sup)
+        eval_sup_writer.add_scalar('clf acc', eval_clf_acc, global_step=step_sup)
+
+        # save model every epoch
+        torch.save(model.state_dict(), save_path)
 
 training()

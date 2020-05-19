@@ -185,21 +185,39 @@ class PianoRollAudioDataset(Dataset):
             new_maestro_dataset[m["audio_filename"]] = m
 
         # create emotion annotation dataset with q_composer + q_title as key
-        with open("filtered_yamaha_emotion.json", "r+") as f:
-            emotion_dataset = json.load(f)
-        new_emotion_dataset = {}
-        for e in emotion_dataset:
-            # set classes: split energy and valence into 4 clusters
-            if e["res"]["energy"] > 0.25 and e["res"]["valence"] > 0.25:
-                e["res"]["emotion_class"] = 0
-            elif e["res"]["energy"] > 0.25 and e["res"]["valence"] <= 0.25:
-                e["res"]["emotion_class"] = 1
-            elif e["res"]["energy"] <= 0.25 and e["res"]["valence"] <= 0.25:
-                e["res"]["emotion_class"] = 2
-            elif e["res"]["energy"] <= 0.25 and e["res"]["valence"] > 0.25:
-                e["res"]["emotion_class"] = 3
+        if os.path.exists("final_yamaha_emotion.json"):
+            with open("final_yamaha_emotion.json", "r+") as f:
+                new_emotion_dataset = json.load(f)
+        
+        else:
+            with open("filtered_yamaha_emotion.json", "r+") as f:
+                emotion_dataset = json.load(f)
+            new_emotion_dataset = {}
 
-            new_emotion_dataset[e["q_composer"] + " " + e["q_title"]] = e
+            emotions = []
+
+            for e in emotion_dataset:
+                # set classes: split energy and valence into 4 clusters
+                if e["res"] > 0.25 and e["res"]["valence"] > 0.25:
+                    e["res"]["emotion_class"] = 0
+                elif e["res"]["energy"] > 0.25 and e["res"]["valence"] <= 0.25:
+                    e["res"]["emotion_class"] = 1
+                elif e["res"]["energy"] <= 0.25 and e["res"]["valence"] <= 0.25:
+                    e["res"]["emotion_class"] = 2
+                elif e["res"]["energy"] <= 0.25 and e["res"]["valence"] > 0.25:
+                    e["res"]["emotion_class"] = 3
+
+                new_emotion_dataset[e["q_composer"] + " " + e["q_title"]] = e
+            
+            with open("final_yamaha_emotion.json", "w+") as f:
+                json.dump(new_emotion_dataset, f)
+        
+        # prepare the list of songs that have emotion annotations with it
+        with open("emotion_data_v2.txt", "w+") as f:
+            for audio_filename in new_maestro_dataset.keys():
+                if new_maestro_dataset[audio_filename]["canonical_composer"] + " " \
+                    + new_maestro_dataset[audio_filename]["canonical_title"] in new_emotion_dataset:
+                    f.write("/data/MAESTRO/" + audio_filename + "\n")
         
         return new_maestro_dataset, new_emotion_dataset
 
@@ -213,7 +231,8 @@ class MAESTRO(PianoRollAudioDataset):
         return ["train", "validation", "test", "train_emotion", "validation_emotion", "test_emotion"]
 
     def files(self, group):
-        with open("emotion_data.txt", "r+") as f:
+        with open("emotion_data_v2.txt", "r+") as f:
+            # can control percentage of semi-supervised here
             lines = [k.replace("\n", "") for k in f.readlines()]
         
         if "emotion" in group:
@@ -234,8 +253,16 @@ class MAESTRO(PianoRollAudioDataset):
             files = sorted([(os.path.join(self.path, row['audio_filename']),
                                 os.path.join(self.path, row['midi_filename'])) for row in metadata 
                                 if row['split'] == group])
+            
+            # for labelled data, put them in the emotion group
+            new_files = []
+            for audio, midi in files:
+                if audio in lines:
+                    pass
+                else:
+                    new_files.append((audio, midi))
 
-            files = [(audio, midi) for audio, midi in files]
+            files = new_files
             random.Random(777).shuffle(files)
 
             result = []
