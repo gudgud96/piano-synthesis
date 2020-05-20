@@ -10,6 +10,7 @@ from tensorboardX import SummaryWriter
 import json, os
 import datetime
 from tqdm import tqdm
+import numpy as np
 
 # housekeeping
 with open('config.json') as f:
@@ -26,7 +27,7 @@ PR_DIM = 88
 
 # load unlabelled data
 train_ds = MAESTRO(path='/data/MAESTRO', groups=['train'], sequence_length=320000)
-train_dl = DataLoader(train_ds, batch_size=args["batch_size"], shuffle=False, num_workers=0)
+train_dl = DataLoader(train_ds, batch_size=args["batch_size"], shuffle=True, num_workers=0)
 val_ds = MAESTRO(path='/data/MAESTRO', groups=['validation'], sequence_length=320000)
 val_dl = DataLoader(val_ds, batch_size=args["batch_size"], shuffle=False, num_workers=0)
 test_ds = MAESTRO(path='/data/MAESTRO', groups=['test'], sequence_length=320000)
@@ -34,7 +35,7 @@ test_dl = DataLoader(test_ds, batch_size=args["batch_size"], shuffle=False, num_
 
 # load emotion labelled data
 emotion_train_ds = MAESTRO(path='/data/MAESTRO', groups=['train_emotion'], sequence_length=320000)
-emotion_train_dl = DataLoader(emotion_train_ds, batch_size=args["batch_size"] // 2, shuffle=False, num_workers=0)
+emotion_train_dl = DataLoader(emotion_train_ds, batch_size=args["batch_size"] // 2, shuffle=True, num_workers=0)
 emotion_val_ds = MAESTRO(path='/data/MAESTRO', groups=['validation_emotion'], sequence_length=320000)
 emotion_val_dl = DataLoader(emotion_val_ds, batch_size=args["batch_size"] // 2, shuffle=False, num_workers=0)
 emotion_test_ds = MAESTRO(path='/data/MAESTRO', groups=['test_emotion'], sequence_length=320000)
@@ -119,7 +120,7 @@ eval_sup_writer = SummaryWriter(eval_log_dir + "_sup")
 
 
 def loss_function(melspec_hat, melspec, z_s_prob, emotion_label, z_u_dist, 
-                  is_sup=False):
+                  z_s_dist, is_sup=False):
     
     def std_normal(shape):
         N = Normal(torch.zeros(shape), torch.ones(shape))
@@ -130,22 +131,38 @@ def loss_function(melspec_hat, melspec, z_s_prob, emotion_label, z_u_dist,
 
     recon_loss = torch.nn.MSELoss()(melspec_hat, melspec)
     normal = std_normal(z_u_dist.mean.size())
-    kl_loss = kl_divergence(z_u_dist, normal).mean()
+    kl_lat_unsup = kl_divergence(z_u_dist, normal).mean()
+    kld_lat_sup = torch.Tensor([0]).cuda()
 
-    # unsupervised: reconstruction + KL + entropy
+    for k in torch.arange(0, NUM_EMOTIONS):       # number of components
+        # infer current p(z|y)
+        mu_p_cls_zs, var_p_cls_zs = model.mu_zs_lookup(k.cuda()), model.logvar_zs_lookup(k.cuda()).exp_()
+        dis_p_cls_zs = Normal(mu_p_cls_zs, var_p_cls_zs)
+        kld_lat = torch.mean(kl_divergence(z_s_dist, dis_p_cls_zs), dim=-1)
+        kld_lat *= z_s_prob[:, k]
+        kld_lat_sup += kld_lat.mean()
+    
+    # KL class loss --> KL[q(y|x) || p(y)] = H(q(y|x)) - log p(y)
+    def entropy(qy_x):
+        return torch.mean(qy_x * torch.log(qy_x), dim=1)
+
+    kld_cls = (entropy(z_s_prob) - np.log(1 / NUM_EMOTIONS)).mean()
+    
     if not is_sup:
-        entropy_loss = (-z_s_prob * torch.log(z_s_prob))
-        entropy_loss = entropy_loss.mean()
-        loss = recon_loss + kl_loss + entropy_loss
-        return loss, recon_loss, kl_loss, entropy_loss
+        loss = recon_loss + kl_lat_unsup + kld_lat_sup + kld_cls
+        return loss, recon_loss, kl_lat_unsup, kld_lat_sup, kld_cls
 
-    # supervised: reconstruction + KL + classification
     else:
+        mu_p_cls_zs, var_p_cls_zs = model.mu_zs_lookup(emotion_label.cuda().long()), \
+                                    model.logvar_zs_lookup(emotion_label.cuda().long()).exp_()
+        dis_p_cls_zs = Normal(mu_p_cls_zs, var_p_cls_zs)
+        kld_lat_sup = torch.mean(kl_divergence(z_s_dist, dis_p_cls_zs), dim=-1).mean()
+
         clf_loss = torch.nn.CrossEntropyLoss()(z_s_prob, emotion_label)
         clf_acc = accuracy_score(torch.argmax(z_s_prob, dim=-1).cpu().detach().numpy(),
                                  emotion_label.cpu().detach().numpy())
-        loss = recon_loss + kl_loss + clf_loss
-        return loss, recon_loss, kl_loss, clf_loss, clf_acc
+        loss = recon_loss + kl_lat_unsup + kld_lat_sup + clf_loss
+        return loss, recon_loss, kl_lat_unsup, kld_lat_sup, clf_loss, clf_acc
 
 
 def training():
@@ -165,24 +182,27 @@ def training():
             audio, onset_pr = x     # (b, 320000), (b, t=625, 88)
             melspec = torch.transpose(wav_to_melspec(audio), 1, 2)[:, :-1, :]   # (b, 625, 128)
             melspec, onset_pr = melspec.cuda(), onset_pr.cuda()
-            melspec_hat, z_s_prob, z_u_dist = model(melspec, onset_pr, is_sup=False, z_s=None)
+            melspec_hat, z_s_prob, z_u_dist, z_s_dist = model(melspec, onset_pr, is_sup=False, z_s=None)
 
-            loss, recon_loss, kl_loss, entropy_loss = loss_function(melspec_hat, melspec, z_s_prob, 
-                                                                    None, z_u_dist, 
-                                                                    is_sup=False)
+            loss, recon_loss, kl_lat_unsup, kld_lat_sup, kld_cls = loss_function(melspec_hat, melspec, z_s_prob, 
+                                                                                None, z_u_dist, z_s_dist,
+                                                                                is_sup=False)
             
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
             scheduler.step()
 
-            print("Batch {}/{}: Recon: {:.4} KL: {:.4} Entropy: {:.4}".format(i+1, len(train_dl),
-                                                                            recon_loss.item(), 
-                                                                            kl_loss.item(), 
-                                                                            entropy_loss.item()),
-                                                                            end="\r")
+            print("Batch {}/{}: Recon: {:.4} KL Unsup: {:.4} KL Sup: {:.4} KL Cls: {:.4}".format(i+1, len(train_dl),
+                                                                                                recon_loss.item(), 
+                                                                                                kl_lat_unsup.item(),
+                                                                                                kld_lat_sup.item(),
+                                                                                                kld_cls.item()),
+                                                                                                end="\r")
 
-            train_unsup_writer.add_scalar('recon', recon_loss.item(), global_step=step_unsup)
-            train_unsup_writer.add_scalar('kl', kl_loss.item(), global_step=step_unsup)
-            train_unsup_writer.add_scalar('entropy', entropy_loss.item(), global_step=step_unsup)
+            train_unsup_writer.add_scalar('Recon', recon_loss.item(), global_step=step_unsup)
+            train_unsup_writer.add_scalar('KL Unsup', kl_lat_unsup.item(), global_step=step_unsup)
+            train_unsup_writer.add_scalar('KL Sup', kld_lat_sup.item(), global_step=step_unsup)
+            train_unsup_writer.add_scalar('KL Cls', kld_cls.item(), global_step=step_unsup)
             train_unsup_writer.add_scalar('learning_rate', scheduler.optimizer.param_groups[0]["lr"], 
                                             global_step=learning_rate_counter)
 
@@ -190,29 +210,32 @@ def training():
             learning_rate_counter +=1
         
         # evaluate unsupervised
-        eval_loss, eval_recon_loss, eval_kl_loss, eval_entropy_loss = 0, 0, 0, 0
+        eval_loss, eval_recon_loss, eval_kl_unsup_loss, eval_kl_sup_loss, eval_kl_cls = 0, 0, 0, 0, 0
         for i, x in enumerate(val_dl):
             
             audio, onset_pr = x     # (b, 320000), (b, t=625, 88)
             melspec = torch.transpose(wav_to_melspec(audio), 1, 2)[:, :-1, :]   # (b, 625, 128)
             melspec, onset_pr = melspec.cuda(), onset_pr.cuda()
-            melspec_hat, z_s_prob, z_u_dist = model(melspec, onset_pr, is_sup=False, z_s=None)
+            melspec_hat, z_s_prob, z_u_dist, z_s_dist = model(melspec, onset_pr, is_sup=False, z_s=None)
 
-            loss, recon_loss, kl_loss, entropy_loss = loss_function(melspec_hat, melspec, z_s_prob, 
-                                                                    None, z_u_dist, 
-                                                                    is_sup=False)
+            loss, recon_loss, kl_lat_unsup, kld_lat_sup, kld_cls = loss_function(melspec_hat, melspec, z_s_prob, 
+                                                                                None, z_u_dist, z_s_dist,
+                                                                                is_sup=False)
             
             eval_loss += loss.item() / len(val_dl)
             eval_recon_loss += recon_loss.item() / len(val_dl)
-            eval_kl_loss += kl_loss.item() / len(val_dl)
-            eval_entropy_loss += entropy_loss.item() / len(val_dl)
+            eval_kl_unsup_loss += kl_lat_unsup.item() / len(val_dl)
+            eval_kl_sup_loss += kld_lat_sup.item() / len(val_dl)
+            eval_kl_cls += kld_cls.item() / len(val_dl)
 
-        print("Unsup Eval: Recon: {:.4} KL: {:.4} Entropy: {:.4}".format(eval_recon_loss, 
-                                                                        eval_kl_loss, 
-                                                                        eval_entropy_loss))
-        eval_unsup_writer.add_scalar('recon', eval_recon_loss, global_step=step_unsup)
-        eval_unsup_writer.add_scalar('kl', eval_kl_loss, global_step=step_unsup)
-        eval_unsup_writer.add_scalar('entropy', eval_entropy_loss, global_step=step_unsup)
+        print("Unsup Eval: Recon: {:.4} KL Unsup: {:.4} KL Sup: {:.4} KL Cls: {:.4}".format(eval_recon_loss, 
+                                                                                            eval_kl_unsup_loss,
+                                                                                            eval_kl_sup_loss, 
+                                                                                            eval_kl_cls))
+        eval_unsup_writer.add_scalar('Recon', eval_recon_loss, global_step=step_unsup)
+        eval_unsup_writer.add_scalar('KL Unsup', eval_kl_unsup_loss, global_step=step_unsup)
+        eval_unsup_writer.add_scalar('KL Sup', eval_kl_sup_loss, global_step=step_unsup)
+        eval_unsup_writer.add_scalar('KL Cls', eval_kl_cls, global_step=step_unsup)
 
 
         print("Supervised...")
@@ -230,26 +253,29 @@ def training():
 
             melspec, onset_pr, emotion_label, emotion_label_oh \
                 = melspec.cuda(), onset_pr.cuda(), emotion_label.cuda(), emotion_label_oh.cuda()
-            melspec_hat, z_s_prob, z_u_dist = model(melspec, onset_pr, is_sup=True, z_s=emotion_label_oh)
+            melspec_hat, z_s_prob, z_u_dist, z_s_dist = model(melspec, onset_pr, is_sup=True, z_s=emotion_label)
 
-            loss, recon_loss, kl_loss, clf_loss, clf_acc = loss_function(melspec_hat, melspec, z_s_prob, 
-                                                                        emotion_label, z_u_dist, 
-                                                                        is_sup=True)
+            loss, recon_loss, kl_lat_unsup, kl_lat_sup, clf_loss, clf_acc = loss_function(melspec_hat, melspec, z_s_prob, 
+                                                                                        emotion_label, z_u_dist, z_s_dist,
+                                                                                        is_sup=True)
             
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
             scheduler.step()
 
-            print("Batch {}/{}: Recon: {:.4} KL: {:.4} CLF Loss: {:.4} Acc: {:.4}".format(i+1, 
-                                                                                        len(emotion_train_dl),
-                                                                                        recon_loss.item(), 
-                                                                                        kl_loss.item(), 
-                                                                                        clf_loss.item(), 
-                                                                                        clf_acc), end="\r")
+            print("Batch {}/{}: Recon: {:.4} KL Unsup: {:.4} KL Sup: {:.4} CLF Loss: {:.4} Acc: {:.4}".format(i+1, 
+                                                                                                            len(emotion_train_dl),
+                                                                                                            recon_loss.item(), 
+                                                                                                            kl_lat_unsup.item(), 
+                                                                                                            kl_lat_sup.item(),
+                                                                                                            clf_loss.item(), 
+                                                                                                            clf_acc), end="\r")
                                             
-            train_sup_writer.add_scalar('recon', recon_loss.item(), global_step=step_sup)
-            train_sup_writer.add_scalar('kl', kl_loss.item(), global_step=step_sup)
-            train_sup_writer.add_scalar('clf loss', clf_loss.item(), global_step=step_sup)
-            train_sup_writer.add_scalar('clf acc', clf_acc, global_step=step_sup)
+            train_sup_writer.add_scalar('Recon', recon_loss.item(), global_step=step_sup)
+            train_sup_writer.add_scalar('KL Unsup', kl_lat_unsup.item(), global_step=step_sup)
+            train_sup_writer.add_scalar('KL Sup', kl_lat_sup, global_step=step_unsup)
+            train_sup_writer.add_scalar('CLF Loss', clf_loss.item(), global_step=step_sup)
+            train_sup_writer.add_scalar('CLF Acc', clf_acc, global_step=step_sup)
             train_unsup_writer.add_scalar('learning_rate', scheduler.optimizer.param_groups[0]["lr"], 
                                             global_step=learning_rate_counter)
 
@@ -257,7 +283,7 @@ def training():
             learning_rate_counter += 1
             
         # evaluate supervised
-        eval_loss, eval_recon_loss, eval_kl_loss, eval_clf_loss, eval_clf_acc = 0, 0, 0, 0, 0
+        eval_loss, eval_recon_loss, eval_kl_unsup_loss, eval_kl_sup_loss, eval_clf_loss, eval_clf_acc = 0, 0, 0, 0, 0, 0
         for i, x in enumerate(emotion_val_dl):
 
             audio, onset_pr, emotion_label = x   # (b, 320000), (b, t=625, 88), (b,)
@@ -269,26 +295,31 @@ def training():
 
             melspec, onset_pr, emotion_label, emotion_label_oh \
                 = melspec.cuda(), onset_pr.cuda(), emotion_label.cuda(), emotion_label_oh.cuda()
-            melspec_hat, z_s_prob, z_u_dist = model(melspec, onset_pr, is_sup=True, z_s=emotion_label_oh)
+            melspec_hat, z_s_prob, z_u_dist, z_s_dist = model(melspec, onset_pr, is_sup=True, z_s=emotion_label)
 
-            loss, recon_loss, kl_loss, clf_loss, clf_acc = loss_function(melspec_hat, melspec, z_s_prob, 
-                                                                        emotion_label, z_u_dist, 
-                                                                        is_sup=True)
+            loss, recon_loss, kl_lat_unsup, kl_lat_sup, clf_loss, clf_acc = loss_function(melspec_hat, melspec, z_s_prob, 
+                                                                                        emotion_label, z_u_dist, z_s_dist,
+                                                                                        is_sup=True)
 
             eval_loss += loss.item() / len(emotion_val_dl)
             eval_recon_loss += recon_loss.item() / len(emotion_val_dl)
-            eval_kl_loss += kl_loss.item() / len(emotion_val_dl)
+            eval_kl_unsup_loss += kl_lat_unsup.item() / len(emotion_val_dl)
+            eval_kl_sup_loss += kl_lat_sup.item() / len(emotion_val_dl)
             eval_clf_loss += clf_loss.item() / len(emotion_val_dl)
             eval_clf_acc += clf_acc / len(emotion_val_dl)
             
-        print("Sup Eval: Recon: {:.4} KL: {:.4} Clf Loss: {:.4} Acc: {:.4}".format(eval_recon_loss, 
-                                                                                eval_kl_loss, 
-                                                                                eval_clf_loss,
-                                                                                eval_clf_acc))
-        eval_sup_writer.add_scalar('recon', eval_recon_loss, global_step=step_sup)
-        eval_sup_writer.add_scalar('kl', eval_kl_loss, global_step=step_sup)
-        eval_sup_writer.add_scalar('clf loss' , eval_clf_loss, global_step=step_sup)
-        eval_sup_writer.add_scalar('clf acc', eval_clf_acc, global_step=step_sup)
+        print("Sup Eval: Recon: {:.4} KL Unsup: {:.4} KL Sup: {:.4} Clf Loss: {:.4} Acc: {:.4}".format(eval_recon_loss, 
+                                                                                                    eval_kl_unsup_loss,
+                                                                                                    eval_kl_sup_loss,
+                                                                                                    eval_clf_loss,
+                                                                                                    eval_clf_acc))
+
+        eval_sup_writer.add_scalar('Recon', eval_recon_loss, global_step=step_sup)
+        eval_sup_writer.add_scalar('KL Unsup', eval_kl_unsup_loss, global_step=step_sup)
+        eval_sup_writer.add_scalar('KL Sup', eval_kl_sup_loss, global_step=step_unsup)
+        eval_sup_writer.add_scalar('CLF Loss', eval_clf_loss, global_step=step_sup)
+        eval_sup_writer.add_scalar('CLF Acc', eval_clf_acc, global_step=step_sup)
+
 
         # save model every epoch
         torch.save(model.state_dict(), save_path)

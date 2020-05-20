@@ -18,19 +18,17 @@ class PianoTacotron(torch.nn.Module):
         super().__init__()
 
         # posterior_net is shared by q_z_u and q_z_s
-        self.posterior_u_enc = LatentEncoder(input_dim=melspec_dim + pr_dim + k_dims,
+        self.posterior_enc = LatentEncoder(input_dim=melspec_dim + pr_dim + k_dims,
                                             kernel_size=kernel_size,
                                             stride=stride)
-        self.posterior_s_enc = LatentEncoder(input_dim=melspec_dim + pr_dim,
-                                            kernel_size=kernel_size,
-                                            stride=stride)
+        self.posterior_u_init, self.posterior_s_init = nn.Linear(linear_dims, linear_dims), \
+                                                        nn.Linear(linear_dims, linear_dims)
         self.posterior_u_mu, self.posterior_u_var = nn.Linear(linear_dims, z_dims), nn.Linear(linear_dims, z_dims)
-        self.posterior_s = nn.Linear(linear_dims, k_dims)
-        self.gs = GumbelSoftmax(k_dims, k_dims)
+        self.posterior_s_mu, self.posterior_s_var = nn.Linear(linear_dims, z_dims), nn.Linear(linear_dims, z_dims)
 
         # piano roll encoder
         self.piano_roll_encoder = PianoRollEncoder(input_dim=pr_dim)
-        self.proj_encoder_out = nn.Linear(388, linear_dims)
+        self.proj_encoder_out = nn.Linear(512, linear_dims)
 
         # decoder prenet
         self.prenet = PreNet(melspec_dim, sizes=prenet_sizes)
@@ -45,34 +43,47 @@ class PianoTacotron(torch.nn.Module):
         # final out linear layer
         self.linear_final = nn.Linear(t_dims, melspec_dim * r)
         self.r  = r
+        self.n_component = k_dims
+        self.linear_dim = linear_dims
+
+        self._build_mu_lookup()
+        self._build_logvar_lookup(pow_exp=0)
     
     def encode(self, x, y, is_sup=False, z_s=None):
-        # encode z_u and z_s
-        # first, infer z_s 
-        q_z_s_dist = self.posterior_s_enc(torch.cat([x, y], dim=-1))
-        q_z_s_dist = self.posterior_s(q_z_s_dist)
-        z_s_logits, z_s_prob, z_s_predict = self.gs(q_z_s_dist, hard=True)
         
-        # use true labels if given
-        if is_sup:
-            z_s_broadcast = torch.stack([z_s] * x.shape[1], dim=1)
-        else:
-            z_s_broadcast = torch.stack([z_s_predict] * x.shape[1], dim=1)
-        
-        q_z_u_dist = self.posterior_u_enc(torch.cat([x, y, z_s_broadcast], dim=-1))
-        mu_z_u, var_z_u = self.posterior_u_mu(q_z_u_dist), self.posterior_u_var(q_z_u_dist).exp_()
-
         def repar(mu, stddev, sigma=1):
             eps = Normal(0, sigma).sample(sample_shape=stddev.size()).cuda()
             z = mu + stddev * eps  # reparameterization trick
             return z
-        
-        z_u = repar(mu_z_u, var_z_u)
 
+        # encode z_u and z_s
+        # first, infer z_s 
+        q_z_dist = self.posterior_enc(torch.cat([x, y], dim=-1))
+        q_z_s_dist = self.posterior_u_init(q_z_dist)
+        mu_z_s, var_z_s = self.posterior_s_mu(q_z_s_dist), self.posterior_s_var(q_z_s_dist).exp_()
+        z_s_predict = repar(mu_z_s, var_z_s)
+        cls_z_s_logits, cls_z_s_prob = self.approx_qy_x(z_s_predict, self.mu_zs_lookup, 
+                                                        self.logvar_zs_lookup, 
+                                                        n_component=self.n_component)
+        
+        # use true labels if given
+        if is_sup:
+            mu_zs, var_z_s = self.mu_zs_lookup(z_s), self.logvar_zs_lookup(z_s).exp_()
+            z_s_labelled = repar(mu_zs, var_z_s)
+            z_s_broadcast = torch.stack([z_s_labelled] * x.shape[1], dim=1)
+        else:
+            z_s_broadcast = torch.stack([z_s_predict] * x.shape[1], dim=1)
+        
+        # encode z_u
+        q_z_u_dist = self.posterior_u_init(q_z_dist)
+        mu_z_u, var_z_u = self.posterior_u_mu(q_z_u_dist), self.posterior_u_var(q_z_u_dist).exp_()
+        z_u = repar(mu_z_u, var_z_u)
+        
         # encode piano roll
         piano_roll_features = self.piano_roll_encoder(y)
 
-        return z_s_predict, z_s_prob, z_u, piano_roll_features, Normal(mu_z_u, var_z_u)
+        return z_s_predict, cls_z_s_logits, cls_z_s_prob, z_u, piano_roll_features, \
+                Normal(mu_z_u, var_z_u), Normal(mu_z_s, var_z_s)
     
     def decode(self, x, z_s, z_u, piano_roll_features):
         # concat piano_roll_features with z_s, z_u
@@ -107,18 +118,71 @@ class PianoTacotron(torch.nn.Module):
         dec_out = dec_out[:, :-1, :]            # remove last frame to remain at 625
         return dec_out
     
+    def generate(self, x, y, z_s_target):
+        print(x.shape, y.shape)
+        z_s_predict, z_s_prob, z_u, piano_roll_features, z_u_dist = self.encode(x, y, is_sup=False, z_s=z_s_target)
+
+        self.decode(x[:, :30, :], z_s_target, z_u, piano_roll_features[:, :30, :])
+
+    
     def forward(self, x, y, is_sup=False, z_s=None):
         # x: mel-spectrogram: (b, t, n_filters)
         # y: onset piano roll: (b, t, 88)
 
-        z_s_predict, z_s_prob, z_u, piano_roll_features, z_u_dist = self.encode(x, y, is_sup=is_sup, z_s=z_s)
+        z_s_predict, cls_z_s_logits, cls_z_s_prob, z_u, piano_roll_features, \
+            z_u_dist, z_s_dist = self.encode(x, y, is_sup=is_sup, z_s=z_s)
+
+        def repar(mu, stddev, sigma=1):
+            eps = Normal(0, sigma).sample(sample_shape=stddev.size()).cuda()
+            z = mu + stddev * eps  # reparameterization trick
+            return z
         
         if is_sup:
-            dec_out = self.decode(x, z_s, z_u, piano_roll_features)
+            mu_z_s_labelled, var_z_s_labelled = self.mu_zs_lookup(z_s), self.logvar_zs_lookup(z_s)
+            z_s_labelled = repar(mu_z_s_labelled, var_z_s_labelled)
+            dec_out = self.decode(x, z_s_labelled, z_u, piano_roll_features)
         else:
             dec_out = self.decode(x, z_s_predict, z_u, piano_roll_features)
         
-        return dec_out, z_s_prob, z_u_dist
+        return dec_out, cls_z_s_prob, z_u_dist, z_s_dist
+    
+    def _build_mu_lookup(self):
+        mu_zs_lookup = nn.Embedding(self.n_component, self.linear_dim)
+        nn.init.xavier_uniform_(mu_zs_lookup.weight)
+        mu_zs_lookup.weight.requires_grad = True
+        self.mu_zs_lookup = mu_zs_lookup
+
+    def _build_logvar_lookup(self, pow_exp=0, logvar_trainable=False):
+        logvar_zs_lookup = nn.Embedding(self.n_component, self.linear_dim)
+        init_sigma = np.exp(pow_exp)
+        init_logvar = np.log(init_sigma ** 2)
+        nn.init.constant_(logvar_zs_lookup.weight, init_logvar)
+        logvar_zs_lookup.weight.requires_grad = logvar_trainable
+        self.logvar_zs_lookup = logvar_zs_lookup
+
+    def _infer_class(self, q_z):
+        logLogit_qy_x, qy_x = self._approx_qy_x(q_z, self.mu_zs_lookup, 
+                                                self.logvar_zs_lookup, 
+                                                n_component=self.n_component)
+        val, y = torch.max(qy_x, dim=1)
+        return logLogit_qy_x, qy_x, y
+
+    def approx_qy_x(self, z, mu_lookup, logvar_lookup, n_component):
+        def log_gauss_lh(z, mu, logvar):
+            """
+            Calculate p(z|y), the likelihood of z w.r.t. a Gaussian component
+            """
+            llh = - 0.5 * (torch.pow(z - mu, 2) / torch.exp(logvar) + logvar + np.log(2 * np.pi))
+            llh = torch.sum(llh, dim=1)  # sum over dimensions
+            return llh
+
+        logLogit_qy_x = torch.zeros(z.shape[0], n_component).cuda()  # log-logit of q(y|x)
+        for k_i in torch.arange(0, n_component):
+            mu_k, logvar_k = mu_lookup(k_i.cuda()), logvar_lookup(k_i.cuda())
+            logLogit_qy_x[:, k_i] = log_gauss_lh(z, mu_k, logvar_k) + np.log(1 / n_component)
+
+        qy_x = torch.nn.functional.softmax(logLogit_qy_x, dim=1)
+        return logLogit_qy_x, qy_x
 
         
 
