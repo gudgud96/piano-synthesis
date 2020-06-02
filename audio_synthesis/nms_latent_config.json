@@ -1,0 +1,8 @@
+{
+    "name": "recon_nms_latent",
+    "epochs": 2000,
+    "batch_size": 64,
+    "lr": 0.002,
+    "melspec_mode": "log-minmax",
+    "percent": 25
+}

@@ -58,30 +58,56 @@ class Normalizer():
         torch.save(self.min_max_mean, "normalizer.pt")
 
 
-def loss_function(melspec_hat, melspec, cls_z_logits, cls_z_prob, z_dist, is_sup=False, emotion_cls=None,
-                 step=None, beta=1):
+def loss_function(melspec_hat, melspec, cls_z_art_logits, cls_z_art_prob, z_art_dist,
+                cls_z_dyn_logits, cls_z_dyn_prob, z_dyn_dist,
+                cls_z_art_prob_2, cls_z_dyn_prob_2,
+                is_sup=False, emotion_cls=None, step=None, beta=1):
     
     # kl annealing
     if not step is None:
         beta_0 = min(step / 10000 * beta, beta)
     else:
         beta_0 = 1
+    beta_1 = min(step / 2000 * beta, beta)
     
     recon_loss = torch.nn.MSELoss()(melspec_hat, melspec)
 
     if is_sup:
-        cls_loss = torch.nn.CrossEntropyLoss()(cls_z_prob, emotion_cls)
-        
-        mu, var = model.mu_lookup(emotion_cls.cuda().long()), \
-                        model.logvar_lookup(emotion_cls.cuda().long()).exp_()
+        # handle articulation
+        cls_art_loss = torch.nn.CrossEntropyLoss()(cls_z_art_prob, emotion_cls[0].cuda())
+        mu, var = model.mu_art_lookup(emotion_cls[0].cuda().long()), \
+                        model.logvar_art_lookup(emotion_cls[0].cuda().long()).exp_()
         dis = Normal(mu, var)
-        kl_loss = kl_divergence(z_dist, dis).mean()
+        kl_loss_art = kl_divergence(z_art_dist, dis).mean()
         
-        clf_acc = accuracy_score(torch.argmax(cls_z_prob, dim=-1).cpu().detach().numpy(),
-                                    emotion_cls.cpu().detach().numpy())
+        clf_art_acc = accuracy_score(torch.argmax(cls_z_art_prob, dim=-1).cpu().detach().numpy(),
+                                    emotion_cls[0].cpu().detach().numpy())
+        
+        # handle dynamic
+        cls_dyn_loss = torch.nn.CrossEntropyLoss()(cls_z_dyn_prob, emotion_cls[1].cuda())
+        mu, var = model.mu_dyn_lookup(emotion_cls[1].cuda().long()), \
+                        model.logvar_dyn_lookup(emotion_cls[1].cuda().long()).exp_()
+        dis = Normal(mu, var)
+        kl_loss_dyn = kl_divergence(z_dyn_dist, dis).mean()
 
-        loss = recon_loss + cls_loss + beta_0 * kl_loss
-        return loss, recon_loss, cls_loss, kl_loss, clf_acc
+        clf_dyn_acc = accuracy_score(torch.argmax(cls_z_dyn_prob, dim=-1).cpu().detach().numpy(),
+                                    emotion_cls[1].cpu().detach().numpy())
+
+        # consolidate
+        cls_loss = cls_art_loss + cls_art_loss
+        kl_loss = kl_loss_art + kl_loss_dyn
+        loss = 10 * recon_loss + cls_loss + beta_0 * kl_loss
+
+        # cyclic loss
+        loss2 = beta_1 * (torch.nn.CrossEntropyLoss()(cls_z_art_prob_2, emotion_cls[0].cuda()) + \
+                        torch.nn.CrossEntropyLoss()(cls_z_dyn_prob_2, emotion_cls[1].cuda()))
+        clf_art_acc_2 = accuracy_score(torch.argmax(cls_z_art_prob_2, dim=-1).cpu().detach().numpy(),
+                                    emotion_cls[0].cpu().detach().numpy())
+        clf_dyn_acc_2 = accuracy_score(torch.argmax(cls_z_dyn_prob_2, dim=-1).cpu().detach().numpy(),
+                                    emotion_cls[1].cpu().detach().numpy())
+
+        return loss, loss2, recon_loss, kl_loss, cls_art_loss, clf_art_acc, cls_dyn_loss, clf_dyn_acc, \
+                clf_art_acc_2, clf_dyn_acc_2
     
     else:
         kl_loss = 0
@@ -204,7 +230,7 @@ def training():
 
             # use log melspec
             pr = pr.cuda()
-            emotion_cls = emotion_cls.cuda()
+            # emotion_cls = emotion_cls.cuda()
             if args["melspec_mode"] == "log":
                 melspec = torch.log(melspec + 1e-12).cuda()
             elif args["melspec_mode"] == "log-tanh":
@@ -212,32 +238,44 @@ def training():
             elif args["melspec_mode"] == "log-minmax":
                 melspec = normalizer.transform(torch.log(melspec + 1e-12)).cuda()
 
-            melspec_hat, z, cls_z_logits, cls_z_prob, z_dist = model(melspec, pr)
-            loss, recon_loss, cls_loss, kl_loss, clf_acc = loss_function(melspec_hat, melspec, cls_z_logits,
-                                                                        cls_z_prob, z_dist,
-                                                                        step=step_sup,
-                                                                        is_sup=True, emotion_cls=emotion_cls)
+            melspec_hat, z_art, z_dyn, cls_z_art_logits, cls_z_art_prob, z_art_dist, \
+                cls_z_dyn_logits, cls_z_dyn_prob, z_dyn_dist, \
+                cls_z_art_prob_2, cls_z_dyn_prob_2 = model(melspec, pr)
             
+            loss, loss2, recon_loss, kl_loss, cls_art_loss, clf_art_acc, cls_dyn_loss, clf_dyn_acc, \
+                clf_art_acc_2, clf_dyn_acc_2 = loss_function(melspec_hat, melspec, 
+                                                    cls_z_art_logits, cls_z_art_prob, z_art_dist,
+                                                    cls_z_dyn_logits, cls_z_dyn_prob, z_dyn_dist,
+                                                    cls_z_art_prob_2, cls_z_dyn_prob_2,
+                                                    step=step_sup,
+                                                    is_sup=True, emotion_cls=emotion_cls)
+
+            loss = loss + loss2
             loss.backward()
             optimizer.step()
 
-            print("Batch {}/{}: Recon: {:.4} KL Sup: {:.4} CLF Loss: {:.4} Acc: {:.4}".format(i+1, 
-                                                                                        len(train_s_dl),
-                                                                                        recon_loss.item(), 
-                                                                                        kl_loss.item(),
-                                                                                        cls_loss.item(), 
-                                                                                        clf_acc), end="\r")
-                                            
+            print("", end="\r")
+            print('''Batch {}/{}: Recon: {:.4} | CLF Art Loss: {:.4} | Acc Art: {:.4} | CLF Dyn Loss: {:.4} | Acc Dyn: {:.4} | Acc Art 2: {:.4} | Acc Dyn 2: {:.4}'''.format(i+1, len(train_s_dl),
+                    recon_loss.item(), cls_art_loss.item(), clf_art_acc, cls_dyn_loss.item(), clf_dyn_acc,
+                    cls_art_loss.item(), clf_art_acc, cls_dyn_loss.item(), clf_dyn_acc,
+                    clf_art_acc_2, clf_dyn_acc_2), end="\r")
+                              
             train_sup_writer.add_scalar('Recon', recon_loss.item(), global_step=step_sup)
             train_sup_writer.add_scalar('KL Sup', kl_loss.item(), global_step=step_sup)
-            train_sup_writer.add_scalar('CLF Loss', cls_loss.item(), global_step=step_sup)
-            train_sup_writer.add_scalar('CLF Acc', clf_acc, global_step=step_sup)
+            train_sup_writer.add_scalar('CLF Art Loss', cls_art_loss.item(), global_step=step_sup)
+            train_sup_writer.add_scalar('CLF Art Acc', clf_art_acc, global_step=step_sup)
+            train_sup_writer.add_scalar('CLF Dyn Loss', cls_dyn_loss.item(), global_step=step_sup)
+            train_sup_writer.add_scalar('CLF Dyn Acc', clf_dyn_acc, global_step=step_sup)
+            train_sup_writer.add_scalar('CLF Art Acc 2', clf_art_acc_2, global_step=step_sup)
+            train_sup_writer.add_scalar('CLF Dyn Acc 2', clf_dyn_acc_2, global_step=step_sup)
 
             step_sup += 1
             learning_rate_counter +=1
         
         # evaluate supervised
-        eval_loss, eval_recon_loss, eval_cls_loss, eval_cls_acc, eval_kl = 0, 0, 0, 0, 0
+        eval_loss, eval_recon_loss, eval_cls_art_loss, eval_cls_art_acc = 0, 0, 0, 0
+        eval_cls_dyn_loss, eval_cls_dyn_acc, eval_art_acc_2, eval_dyn_acc_2 = 0, 0, 0, 0
+
         for i, x in enumerate(val_s_dl):
             
             audio, onset_pr, frame_pr, emotion_cls = x     # (b, 320000), (b, t=625, 88)
@@ -247,7 +285,7 @@ def training():
             
             # use log melspec
             pr = pr.cuda()
-            emotion_cls = emotion_cls.cuda()
+            # emotion_cls = emotion_cls.cuda()
             if args["melspec_mode"] == "log":
                 melspec = torch.log(melspec + 1e-12).cuda()
             elif args["melspec_mode"] == "log-tanh":
@@ -255,28 +293,39 @@ def training():
             elif args["melspec_mode"] == "log-minmax":
                 melspec = normalizer.transform(torch.log(melspec + 1e-12)).cuda()
             
-            melspec_hat, z, cls_z_logits, cls_z_prob, z_dist = model(melspec, pr)
-            loss, recon_loss, cls_loss, kl_loss, clf_acc = loss_function(melspec_hat, melspec, cls_z_logits,
-                                                                        cls_z_prob, z_dist,
-                                                                        step=step_sup,
-                                                                        is_sup=True, emotion_cls=emotion_cls)
+            melspec_hat, z_art, z_dyn, cls_z_art_logits, cls_z_art_prob, z_art_dist, \
+                cls_z_dyn_logits, cls_z_dyn_prob, z_dyn_dist, \
+                cls_z_art_prob_2, cls_z_dyn_prob_2 = model(melspec, pr)
+            
+            loss, loss2, recon_loss, kl_loss, cls_art_loss, clf_art_acc, cls_dyn_loss, clf_dyn_acc, \
+                clf_art_acc_2, clf_dyn_acc_2 = loss_function(melspec_hat, melspec, 
+                                                    cls_z_art_logits, cls_z_art_prob, z_art_dist,
+                                                    cls_z_dyn_logits, cls_z_dyn_prob, z_dyn_dist,
+                                                    cls_z_art_prob_2, cls_z_dyn_prob_2,
+                                                    step=step_sup,
+                                                    is_sup=True, emotion_cls=emotion_cls)
             
             eval_loss += loss.item() / len(val_s_dl)
             eval_recon_loss += recon_loss.item() / len(val_s_dl)
-            eval_cls_loss += cls_loss.item() / len(val_s_dl)
-            eval_cls_acc += clf_acc / len(val_s_dl)
-            eval_kl = kl_loss.item() / len(val_s_dl)
+            eval_cls_art_loss += cls_art_loss.item() / len(val_s_dl)
+            eval_cls_art_acc += clf_art_acc / len(val_s_dl)
+            eval_cls_dyn_loss += cls_dyn_loss.item() / len(val_s_dl)
+            eval_cls_dyn_acc += clf_dyn_acc / len(val_s_dl)
+            eval_art_acc_2 += clf_art_acc_2 / len(val_s_dl)
+            eval_dyn_acc_2 += clf_dyn_acc_2 / len(val_s_dl)
 
-        print("Sup Eval: Recon: {:.4} KL Sup: {:.4} CLF Loss: {:.4} Acc: {:.4}".format(
-                                                                                eval_recon_loss, 
-                                                                                eval_kl,
-                                                                                eval_cls_loss, 
-                                                                                eval_cls_acc))
+        print("", end="\r")
+        print('''Sup Eval: Recon: {:.4} | CLF Art Loss: {:.4} | Art Acc: {:.4} | CLF Dyn Loss: {:.4} | Dyn Acc: {:.4} | Art Acc 2: {:.4} | Dyn Acc 2: {:.4}'''.format(
+                eval_recon_loss, eval_cls_art_loss, eval_cls_art_acc, eval_cls_dyn_loss, eval_cls_dyn_acc, \
+                eval_art_acc_2, eval_dyn_acc_2))
         
         eval_sup_writer.add_scalar('Recon', eval_recon_loss, global_step=step_sup)
-        eval_sup_writer.add_scalar('KL Sup', eval_kl, global_step=step_sup)
-        eval_sup_writer.add_scalar('CLF Loss', eval_cls_loss, global_step=step_sup)
-        eval_sup_writer.add_scalar('CLF Acc', eval_cls_acc, global_step=step_sup)
+        eval_sup_writer.add_scalar('CLF Art Loss', eval_cls_art_loss, global_step=step_sup)
+        eval_sup_writer.add_scalar('CLF Art Acc', eval_cls_art_acc, global_step=step_sup)
+        eval_sup_writer.add_scalar('CLF Dyn Loss', eval_cls_dyn_loss, global_step=step_sup)
+        eval_sup_writer.add_scalar('CLF Dyn Acc', eval_cls_dyn_acc, global_step=step_sup)
+        eval_sup_writer.add_scalar('CLF Art Acc 2', eval_art_acc_2, global_step=step_sup)
+        eval_sup_writer.add_scalar('CLF Dyn Acc 2', eval_dyn_acc_2, global_step=step_sup)
 
         # save model every epoch
         torch.save(model.state_dict(), save_path)
@@ -287,7 +336,7 @@ def training():
                 p['lr'] = args["lr"] / lr_factor
             lr_factor *= 2
 
-        if ep % 1 == 0:
+        if ep % 10 == 0:
             # plot spectrograms
             audio, onset_pr, frame_pr, emotion_cls = train_s_ds[10]
             pr_visualize = onset_pr + frame_pr
@@ -305,7 +354,9 @@ def training():
             elif args["melspec_mode"] == "log-minmax":
                 melspec = normalizer.transform(torch.log(melspec + 1e-12)).cuda()
             
-            melspec_hat, z, cls_z_logits, cls_z_prob, z_dist = model(melspec, pr)
+            melspec_hat, z_art, z_dyn, cls_z_art_logits, cls_z_art_prob, z_art_dist, \
+                cls_z_dyn_logits, cls_z_dyn_prob, z_dyn_dist, \
+                cls_z_art_prob_2, cls_z_dyn_prob_2 = model(melspec, pr)
             
             if args["melspec_mode"] == "log":
                 melspec_hat_denorm = torch.exp(melspec_hat).cuda().T.squeeze()
@@ -339,9 +390,13 @@ def training():
             train_unsup_writer.add_figure('onset_pr_original', fig, global_step=step_unsup, close=True)
 
             # plot latent space
-            z_lst = []
-            cls_lst = []
-            actual_cls_lst = []
+            z_art_lst = []
+            z_dyn_lst = []
+            cls_art_lst = []
+            cls_dyn_lst = []
+            actual_cls_art_lst = []
+            actual_cls_dyn_lst = []
+
             for i, x_temp in tqdm(enumerate(train_s_dl), total=len(train_s_dl), desc='Running latents on train set:'):
                 audio, onset_pr, frame_pr, emotion_cls = x_temp
                 pr_visualize = onset_pr + frame_pr
@@ -360,14 +415,26 @@ def training():
                     melspec = normalizer.transform(torch.log(melspec + 1e-12)).cuda()
 
                 pr = pr.squeeze()
-                melspec_hat, z, cls_z_logits, cls_z_prob, z_dist = model(melspec, pr)
-                z_lst.append(z.cpu().detach())
-                cls_lst.append(torch.argmax(cls_z_logits, dim=-1).squeeze().cpu().detach())
-                actual_cls_lst.append(emotion_cls.cpu().detach())
+                melspec_hat, z_art, z_dyn, cls_z_art_logits, cls_z_art_prob, z_art_dist, \
+                        cls_z_dyn_logits, cls_z_dyn_prob, z_dyn_dist, \
+                        cls_z_art_prob_2, cls_z_dyn_prob_2 = model(melspec, pr)
+                
+                z_art_lst.append(z_art.cpu().detach())
+                z_dyn_lst.append(z_dyn.cpu().detach())
+
+                cls_art_lst.append(torch.argmax(cls_z_art_prob, dim=-1).squeeze().cpu().detach())
+                actual_cls_art_lst.append(emotion_cls[0].cpu().detach())
+
+                cls_dyn_lst.append(torch.argmax(cls_z_dyn_prob, dim=-1).squeeze().cpu().detach())
+                actual_cls_dyn_lst.append(emotion_cls[1].cpu().detach())
             
-            z_lst = torch.cat(z_lst, dim=0).numpy()
-            cls_lst = torch.cat(cls_lst, dim=0).cpu().detach().numpy()
-            actual_cls_lst = torch.cat(actual_cls_lst, dim=0).cpu().detach().numpy()
+            z_art_lst = torch.cat(z_art_lst, dim=0).numpy()
+            cls_art_lst = torch.cat(cls_art_lst, dim=0).cpu().detach().numpy()
+            actual_cls_art_lst = torch.cat(actual_cls_art_lst, dim=0).cpu().detach().numpy()
+
+            z_dyn_lst = torch.cat(z_dyn_lst, dim=0).numpy()
+            cls_dyn_lst = torch.cat(cls_dyn_lst, dim=0).cpu().detach().numpy()
+            actual_cls_dyn_lst = torch.cat(actual_cls_dyn_lst, dim=0).cpu().detach().numpy()
 
             from sklearn.manifold import TSNE
             import seaborn as sns
@@ -375,18 +442,32 @@ def training():
 
             print("Plotting TSNE...", end="\r")
             tsne = TSNE(n_components=2, verbose=0)  #metric='manhattan'
-            tsne_features = tsne.fit_transform(z_lst)
-            color = cls_lst
+            tsne_features = tsne.fit_transform(z_art_lst)
+            color = cls_art_lst
             palette = sns.color_palette("bright", len(set(color)))
             fig = plt.figure(figsize=(8,8))
             sns.scatterplot(tsne_features[:,0], tsne_features[:,1], palette=palette, hue=color, legend='full')
-            train_unsup_writer.add_figure('tsne_z', fig, global_step=step_sup, close=True)
+            train_unsup_writer.add_figure('tsne_z_art', fig, global_step=step_sup, close=True)
 
             fig = plt.figure(figsize=(8,8))
-            color = actual_cls_lst
+            color = actual_cls_art_lst
             palette = sns.color_palette("bright", len(set(color)))
             sns.scatterplot(tsne_features[:,0], tsne_features[:,1], palette=palette, hue=color, legend='full')
-            train_unsup_writer.add_figure('tsne_z_actual', fig, global_step=step_sup, close=True)
+            train_unsup_writer.add_figure('tsne_z_art_actual', fig, global_step=step_sup, close=True)
+
+            tsne = TSNE(n_components=2, verbose=0)  #metric='manhattan'
+            tsne_features = tsne.fit_transform(z_dyn_lst)
+            color = cls_dyn_lst
+            palette = sns.color_palette("bright", len(set(color)))
+            fig = plt.figure(figsize=(8,8))
+            sns.scatterplot(tsne_features[:,0], tsne_features[:,1], palette=palette, hue=color, legend='full')
+            train_unsup_writer.add_figure('tsne_z_dyn', fig, global_step=step_sup, close=True)
+
+            fig = plt.figure(figsize=(8,8))
+            color = actual_cls_dyn_lst
+            palette = sns.color_palette("bright", len(set(color)))
+            sns.scatterplot(tsne_features[:,0], tsne_features[:,1], palette=palette, hue=color, legend='full')
+            train_unsup_writer.add_figure('tsne_z_dyn_actual', fig, global_step=step_sup, close=True)
             print("Plotting TSNE...done.")
 
             # plot latent space
@@ -453,12 +534,12 @@ if __name__ == "__main__":
     save_path += '_{}'.format(args["melspec_mode"])
     save_path += '_{}'.format(args["percent"])
 
-    NUM_EMOTIONS = 4
-    MELSPEC_DIM = 128
+    NUM_EMOTIONS = 2
+    MELSPEC_DIM = 80
     PR_DIM = 88
 
     print("Loading performance style dict...", end="\r")
-    with open("data/performance_style_dict_v1.json", "r+") as f:
+    with open("data/performance_style_dict_v2.json", "r+") as f:
         performance_style_dict = json.load(f)
     print("Loading performance style dict...done.")
 
@@ -498,14 +579,17 @@ if __name__ == "__main__":
                 performance_style_dict=performance_style_dict)
     test_s_dl = DataLoader(test_s_ds, batch_size=args["batch_size"], shuffle=False, num_workers=0)
 
-    cls_lst = []
+    cls_lst_art = []
+    cls_lst_dyn = []
     for i, x in enumerate(train_s_dl):
         audio, onset_pr, frame_pr, cls = x     # (b, 320000), (b, t=625, 88)
-        cls_lst.append(cls)
+        cls_lst_art.append(cls[0])
+        cls_lst_dyn.append(cls[1])
         
-    cls_lst = torch.cat(cls_lst, dim=0)
+    cls_lst_art = torch.cat(cls_lst_art, dim=0)
+    cls_lst_dyn = torch.cat(cls_lst_dyn, dim=0)
     from collections import Counter
-    print("Supervised actual labels:", Counter(cls_lst.cpu().numpy()))
+    print("Supervised actual labels:", Counter(cls_lst_art.cpu().numpy()), Counter(cls_lst_dyn.cpu().numpy()))
 
     # load emotion data
     # train_emotion_ds = MAESTRO(path='/data/MAESTRO', groups=['train_emotion'], sequence_length=320000)
@@ -516,17 +600,17 @@ if __name__ == "__main__":
     # test_emotion_dl = DataLoader(test_emotion_ds, batch_size=args["batch_size"] // 4, shuffle=False, num_workers=0)
 
     # load model
-    model = NMSLatent(n_component=NUM_EMOTIONS)
+    model = NMSLatentDisentangled(n_component=NUM_EMOTIONS)
     model.cuda()
     optimizer = optim.Adam(model.parameters(), lr=args['lr'], betas=(0.9, 0.98), eps=1e-9)
 
-    wav_to_melspec = Spectrogram.MelSpectrogram(sr=16000)
+    wav_to_melspec = Spectrogram.MelSpectrogram(sr=16000, n_mels=MELSPEC_DIM)
     normalizer = Normalizer(mode="imagewise")
 
     # load writers
     current_time = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
-    train_log_dir = 'logs/'+args['name']+'_performance/'+current_time+'/train'
-    eval_log_dir = 'logs/'+args['name']+'_performance/'+current_time+'/eval'
+    train_log_dir = 'logs/'+args['name']+'_disentangle/'+current_time+'/train'
+    eval_log_dir = 'logs/'+args['name']+'_disentangle/'+current_time+'/eval'
     train_unsup_writer = SummaryWriter(train_log_dir + "_unsup")
     train_sup_writer = SummaryWriter(train_log_dir + "_sup")
     eval_unsup_writer = SummaryWriter(eval_log_dir + "_unsup")
