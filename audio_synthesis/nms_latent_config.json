@@ -1,8 +1,11 @@
 {
-    "name": "recon_nms_latent",
+    "name": "nms_dynamic",
     "epochs": 500,
     "batch_size": 64,
     "lr": 0.002,
     "melspec_mode": "log-minmax",
-    "percent": 25
+    "input_dims": 80,
+    "hidden_dims": 256,
+    "z_dims": 64,
+    "n_component": 2
 }

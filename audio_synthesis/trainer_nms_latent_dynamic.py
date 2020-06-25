@@ -34,6 +34,7 @@ class Normalizer():
                 size = x.shape
                 # x_max = x.view(size[0], size[1]*size[2]).max(1, keepdim=True)[0]
                 # x_min = x.view(size[0], size[1]*size[2]).min(1, keepdim=True)[0]
+                
                 # fix constant min max to be used
                 x_max = torch.Tensor([[10]]).cuda()
                 x_min = torch.Tensor([[-20]]).cuda()
@@ -100,7 +101,7 @@ def loss_function(melspec_hat, melspec, z_art_lst, art_cls_lst, mu_art_lst, var_
                                     emotion_cls[1].cpu().detach().numpy().reshape(-1))
 
         # consolidate
-        cls_loss = 2 * cls_art_loss + cls_dyn_loss
+        cls_loss = cls_art_loss + cls_dyn_loss
         kl_loss = kl_loss_art + kl_loss_dyn
         loss = 10 * recon_loss + cls_loss + beta_0 * kl_loss
 
@@ -581,8 +582,8 @@ if __name__ == "__main__":
     save_path += '_{}'.format(args["melspec_mode"])
     save_path += '_{}'.format(args["percent"])
 
-    NUM_EMOTIONS = 2
-    MELSPEC_DIM = 80
+    NUM_EMOTIONS = args["n_component"]
+    MELSPEC_DIM = args["input_dims"]
     PR_DIM = 88
 
     # print("Loading performance style dict...", end="\r")
@@ -626,28 +627,10 @@ if __name__ == "__main__":
                 performance_style_dict=None)
     test_s_dl = DataLoader(test_s_ds, batch_size=args["batch_size"], shuffle=False, num_workers=0)
 
-    # cls_lst_art = []
-    # cls_lst_dyn = []
-    # for i, x in enumerate(train_s_dl):
-    #     audio, onset_pr, frame_pr, cls = x     # (b, 320000), (b, t=625, 88)
-    #     cls_lst_art.append(cls[0])
-    #     cls_lst_dyn.append(cls[1])
-        
-    # cls_lst_art = torch.cat(cls_lst_art, dim=0)
-    # cls_lst_dyn = torch.cat(cls_lst_dyn, dim=0)
-    # from collections import Counter
-    # print("Supervised actual labels:", Counter(cls_lst_art.cpu().numpy()), Counter(cls_lst_dyn.cpu().numpy()))
-
-    # load emotion data
-    # train_emotion_ds = MAESTRO(path='/data/MAESTRO', groups=['train_emotion'], sequence_length=320000)
-    # train_emotion_dl = DataLoader(train_emotion_ds, batch_size=args["batch_size"] // 4, shuffle=True, num_workers=0)
-    # val_emotion_ds = MAESTRO(path='/data/MAESTRO', groups=['validation_emotion'], sequence_length=320000)
-    # val_emotion_dl = DataLoader(val_emotion_ds, batch_size=args["batch_size"] // 4, shuffle=False, num_workers=0)
-    # test_emotion_ds = MAESTRO(path='/data/MAESTRO', groups=['test_emotion'], sequence_length=320000)
-    # test_emotion_dl = DataLoader(test_emotion_ds, batch_size=args["batch_size"] // 4, shuffle=False, num_workers=0)
-
     # load model
-    model = NMSLatentDisentangledDynamicV2(n_component=NUM_EMOTIONS)
+    model = NMSLatentDisentangledDynamic(input_dims=MELSPEC_DIM, hidden_dims=args["hidden_dims"], 
+                                        z_dims=args["z_dims"],
+                                        n_component=NUM_EMOTIONS)
     model.cuda()
     optimizer = optim.Adam(model.parameters(), lr=args['lr'], betas=(0.9, 0.98), eps=1e-9)
 
@@ -656,8 +639,8 @@ if __name__ == "__main__":
 
     # load writers
     current_time = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
-    train_log_dir = 'logs/'+args['name']+'_dynamic_v1/'+current_time+'/train'
-    eval_log_dir = 'logs/'+args['name']+'_dynamic_v1/'+current_time+'/eval'
+    train_log_dir = 'logs/'+args['name']+'_dynamic_v2/'+current_time+'/train'
+    eval_log_dir = 'logs/'+args['name']+'_dynamic_v2/'+current_time+'/eval'
     train_unsup_writer = SummaryWriter(train_log_dir + "_unsup")
     train_sup_writer = SummaryWriter(train_log_dir + "_sup")
     eval_unsup_writer = SummaryWriter(eval_log_dir + "_unsup")
