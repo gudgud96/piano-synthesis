@@ -6,6 +6,7 @@ from torch.distributions import Normal
 from torch.nn import functional as F
 from layers import *
 from model_utils import *
+from tqdm import tqdm
 
 
 class PianoTacotron(torch.nn.Module):
@@ -122,7 +123,9 @@ class PianoTacotron(torch.nn.Module):
         print(x.shape, y.shape)
         z_s_predict, z_s_prob, z_u, piano_roll_features, z_u_dist = self.encode(x, y, is_sup=False, z_s=z_s_target)
 
-        self.decode(x[:, :30, :], z_s_target, z_u, piano_roll_features[:, :30, :])
+        res = torch.zeros_like(x).cuda()
+        out = self.decode(res, z_s_target, z_u, piano_roll_features)
+        print(res.shape, out.shape)
 
     
     def forward(self, x, y, is_sup=False, z_s=None):
@@ -185,6 +188,88 @@ class PianoTacotron(torch.nn.Module):
         return logLogit_qy_x, qy_x
 
         
+
+class MelSpecReconModel(torch.nn.Module):
+    def __init__(self, melspec_dim, pr_dim, prenet_sizes=[256, 128], 
+                 conv_dims=[32, 32, 64, 64, 128, 128],
+                 lstm_dims=128, linear_dims=128, kernel_size=3, stride=2, 
+                 t_num_layers=6, t_dims=128, t_dropout=0.1, t_maxlen=1000,
+                 z_dims=128, k_dims=4, r=2):
+
+        super().__init__()
+        # decoder prenet
+        self.prenet = PreNet(melspec_dim, sizes=prenet_sizes)
+
+        # use CBHG
+        self.piano_roll_encoder = PianoRollEncoder(input_dim=pr_dim)
+        self.proj_encoder_out = nn.Linear(256, linear_dims)
+
+        # use proj encoder out
+        # self.proj_encoder_out = nn.Linear(88, linear_dims)
+
+        # transformer decoder
+        self.transformer_decoder = TransformerDecoder(input_dim=prenet_sizes[-1], 
+                                                      num_layers=t_num_layers, 
+                                                      d_model=t_dims, 
+                                                      dropout=t_dropout, 
+                                                      max_len=t_maxlen)
+        
+        # final out linear layer
+        self.linear_final = nn.Linear(t_dims, melspec_dim)
+        self.n_component = k_dims
+        self.linear_dim = linear_dims
+    
+    def forward(self, x, y):
+        # x: mel-spectrogram: (b, t, n_filters)
+        # y: onset piano roll: (b, t, 88)
+
+        x_padded = F.pad(input=x, pad=(0, 0, 1, 0), mode='constant', value=0)   # <START> frame
+        x_padded = x_padded[:, :-1, :]      # leave out last frame for prediction
+
+        # y = self.proj_encoder_out(y)
+        # y = self.piano_roll_encoder(y)
+        # y = self.proj_encoder_out(y)
+        y = torch.cat([y, torch.zeros((y.shape[0], y.shape[1], 40)).cuda()], dim=-1)
+
+        # decode prenet
+        dec_x_in = self.prenet(x_padded)
+        
+        # create look_ahead_mask
+        dec_look_ahead_mask = generate_square_subsequent_mask(dec_x_in.shape[1]).cuda()
+        
+        dec_out = self.transformer_decoder(dec_x_in, 
+                                            mask=None, 
+                                            lookup_mask=dec_look_ahead_mask, 
+                                            is_training=True,
+                                            enc_output=y)
+        
+        # decode multiple frames according to reduction factor
+        dec_out = self.linear_final(dec_out)
+        return dec_out
+    
+    def generate(self, y):
+        x = torch.zeros(y.shape[0], 1, 128).cuda()  # (b, 1, 128) 
+        # y = self.piano_roll_encoder(y)
+        # y = self.proj_encoder_out(y)
+        y = torch.cat([y, torch.zeros((y.shape[0], y.shape[1], 40)).cuda()], dim=-1)
+
+        for i in tqdm(range(y.shape[1])):
+            dec_x_in = self.prenet(x)
+            dec_look_ahead_mask = generate_square_subsequent_mask(i+1).cuda()
+
+            dec_out = self.transformer_decoder(dec_x_in, 
+                                                mask=None, 
+                                                lookup_mask=dec_look_ahead_mask, 
+                                                is_training=True,
+                                                enc_output=y)
+            dec_out = self.linear_final(dec_out)    # (b, i+1, 128)
+            print("dec_out", dec_out.shape)
+            predicted_frame = dec_out[:, -1, :].unsqueeze(1).detach()
+            print(predicted_frame)
+            x = torch.cat([x, predicted_frame], dim=1)
+            print("x", x.shape)
+        
+        return x
 
 
 

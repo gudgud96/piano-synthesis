@@ -58,12 +58,11 @@ class Normalizer():
         torch.save(self.min_max_mean, "normalizer.pt")
 
 
-def loss_function(melspec_hat, melspec, z_art_lst, art_cls_lst, mu_art_lst, var_art_lst, 
+def loss_function(melspec_hat, melspec, 
+                z_art_lst, art_cls_lst, mu_art_lst, var_art_lst, 
                 z_dyn_lst, dyn_cls_lst, mu_dyn_lst, var_dyn_lst,
-                z_style, z_style_dist, cls_z_style_logits, cls_z_style_prob,
-                mu_art_lst_hat, var_art_lst_hat, 
-                mu_dyn_lst_hat, var_dyn_lst_hat,
-                art_cls_lst_hat, dyn_cls_lst_hat,
+                z_style, z_style_dist, cls_z_style_logits, cls_z_style_prob, composer_cls,
+                z_art_lst_hat, z_dyn_lst_hat,
                 is_sup=False, emotion_cls=None, step=None, beta=1):
     
     # kl annealing
@@ -105,58 +104,42 @@ def loss_function(melspec_hat, melspec, z_art_lst, art_cls_lst, mu_art_lst, var_
                                 emotion_cls[1].cpu().detach().numpy().reshape(-1))
 
     # handle style -- unsupervised
-    kl_style_loss = 0
-    for k in torch.arange(0, 4):       # number of components
-        mu, var = model.mu_style_lookup(k.cuda()), model.logvar_style_lookup(k.cuda()).exp_()
-        dis = Normal(mu, var)
-        kld_lat = torch.mean(kl_divergence(z_style_dist, dis), dim=-1)
-        kld_lat *= cls_z_style_prob[:, k]
-        kl_style_loss += kld_lat.mean()
+    # kl_style_loss = 0
+    # for k in torch.arange(0, 4):       # number of components
+    #     mu, var = model.mu_style_lookup(composer_cls.cuda()), model.logvar_style_lookup(composer_cls.cuda()).exp_()
+    #     dis = Normal(mu, var)
+    #     kld_lat = torch.mean(kl_divergence(z_style_dist, dis), dim=-1)
+    #     kld_lat *= cls_z_style_prob[:, k]
+    #     kl_style_loss += kld_lat.mean()
     
-    def entropy(qy_x, logLogit_qy_x):
-        return torch.mean(qy_x * torch.nn.functional.log_softmax(logLogit_qy_x, dim=1), dim=1)
+    # def entropy(qy_x, logLogit_qy_x):
+    #     return torch.mean(qy_x * torch.nn.functional.log_softmax(logLogit_qy_x, dim=1), dim=1)
 
-    kl_style_cls = (entropy(cls_z_style_prob, cls_z_style_logits) - np.log(1 / 4)).mean()
-    h_q_style = entropy(cls_z_style_prob, cls_z_style_logits).mean()
+    # kl_style_cls = (entropy(cls_z_style_prob, cls_z_style_logits) - np.log(1 / 4)).mean()
+    # h_q_style = entropy(cls_z_style_prob, cls_z_style_logits).mean()
+
+    # handle style -- supervised
+    mu, var = model.mu_style_lookup(composer_cls.cuda().long()), model.logvar_style_lookup(composer_cls.cuda().long()).exp_()
+    dis = Normal(mu, var)
+    kl_style_loss = kl_divergence(z_style_dist, dis).mean()
+    kl_style_cls = torch.nn.CrossEntropyLoss()(cls_z_style_prob, composer_cls.cuda().long())
 
     # handle articulation and dynamic hat
-    cls_art_hat_loss = torch.nn.CrossEntropyLoss()(art_cls_lst_hat.view(-1, 2), emotion_cls[0].cuda().long().view(-1))
-    clf_art_hat_acc = accuracy_score(torch.argmax(art_cls_lst_hat, dim=-1).cpu().detach().numpy().reshape(-1),
-                                emotion_cls[0].cpu().detach().numpy().reshape(-1))
-
-    cls_dyn_hat_loss = torch.nn.CrossEntropyLoss()(dyn_cls_lst_hat.view(-1, 2), emotion_cls[1].cuda().long().view(-1))        
-    clf_dyn_hat_acc = accuracy_score(torch.argmax(dyn_cls_lst_hat, dim=-1).cpu().detach().numpy().reshape(-1),
-                                emotion_cls[1].cpu().detach().numpy().reshape(-1))
-
-    kl_loss_art_hat, kl_loss_dyn_hat = 0, 0
-    for i in range(mu_art_lst_hat.shape[1]):
-        mu, var = model.mu_art_lookup(emotion_cls[0][:, i].cuda().long()), \
-                        model.logvar_art_lookup(emotion_cls[0][:, i].cuda().long()).exp_()
-        dis = Normal(mu, var)
-        dis_art = Normal(mu_art_lst_hat[:, i, :], var_art_lst_hat[:, i, :])
-        kl_loss_art_hat += kl_divergence(dis_art, dis).mean()
-
-        mu, var = model.mu_dyn_lookup(emotion_cls[1][:, i].cuda().long()), \
-                        model.logvar_dyn_lookup(emotion_cls[1][:, i].cuda().long()).exp_()
-        dis = Normal(mu, var)
-        dis_dyn = Normal(mu_dyn_lst_hat[:, i, :], var_dyn_lst_hat[:, i, :])
-        kl_loss_dyn_hat += kl_divergence(dis_dyn, dis).mean()
-
-    kl_loss_art_hat = kl_loss_art_hat / mu_art_lst_hat.shape[1]
-    kl_loss_dyn_hat = kl_loss_dyn_hat / mu_dyn_lst_hat.shape[1]
+    cls_art_hat_loss = torch.nn.MSELoss()(z_art_lst_hat, z_art_lst)
+    cls_dyn_hat_loss = torch.nn.MSELoss()(z_dyn_lst_hat, z_dyn_lst)
     
     # consolidate
-    cls_loss = 2 * cls_art_loss + cls_dyn_loss
-    cls_loss_hat = 2 * cls_art_hat_loss + cls_dyn_hat_loss
+    cls_loss = cls_art_loss + cls_dyn_loss
+    cls_loss_hat = cls_art_hat_loss + cls_dyn_hat_loss
     kl_loss = kl_loss_art + kl_loss_dyn
-    kl_style = kl_style_loss + kl_style_cls
-    kl_loss_hat = kl_loss_art_hat + kl_loss_dyn_hat
+    # kl_style = kl_style_loss + kl_style_cls
 
-    loss = 10 * recon_loss + cls_loss + cls_loss_hat + beta_0 * (kl_loss + kl_style + kl_loss_hat)
+    loss = 10 * recon_loss + cls_loss + cls_loss_hat + beta_0 * (kl_loss + kl_style_loss) + 5 * kl_style_cls
 
+    # print(recon_loss.item(), cls_loss.item(), cls_loss_hat.item(), kl_loss.item(), kl_style.item())
     return loss, recon_loss, kl_loss, cls_art_loss, clf_art_acc, cls_dyn_loss, clf_dyn_acc, \
-            kl_loss_hat, cls_art_hat_loss, clf_art_hat_acc, cls_dyn_hat_loss, clf_dyn_hat_acc, \
-            kl_style_loss, h_q_style
+            cls_art_hat_loss, 0.0, cls_dyn_hat_loss, 0.0, \
+            kl_style_loss, kl_style_cls
 
 
 def training():
@@ -174,7 +157,7 @@ def training():
             
             optimizer.zero_grad()
 
-            audio, onset_pr, frame_pr, emotion_cls = x     # (b, 320000), (b, t=625, 88)
+            audio, onset_pr, frame_pr, emotion_cls, composer_cls = x     # (b, 320000), (b, t=625, 88)
             # pr = torch.cat([onset_pr, frame_pr], dim=-1)
             pr = onset_pr
             melspec = torch.transpose(wav_to_melspec(audio), 1, 2)[:, :-1, :]   # (b, 625, 128)
@@ -192,18 +175,15 @@ def training():
             melspec_hat, z_art_lst, art_cls_lst, mu_art_lst, var_art_lst, \
                     z_dyn_lst, dyn_cls_lst, mu_dyn_lst, var_dyn_lst, \
                     z_style, z_style_dist, cls_z_style_logits, cls_z_style_prob, \
-                    mu_art_lst_hat, var_art_lst_hat, mu_dyn_lst_hat, var_dyn_lst_hat, \
-                    art_cls_lst_hat, dyn_cls_lst_hat = model(melspec, pr)
+                    z_art_lst_hat, z_dyn_lst_hat = model(melspec, pr)
             
             loss, recon_loss, kl_loss, cls_art_loss, clf_art_acc, cls_dyn_loss, clf_dyn_acc, \
-                kl_loss_hat, cls_art_hat_loss, clf_art_hat_acc, cls_dyn_hat_loss, clf_dyn_hat_acc, \
-                kl_style_loss, h_q_style = loss_function(melspec_hat, melspec, 
+                cls_art_hat_loss, clf_art_hat_acc, cls_dyn_hat_loss, clf_dyn_hat_acc, \
+                kl_style_loss, h_q_style= loss_function(melspec_hat, melspec, 
                                                     z_art_lst, art_cls_lst, mu_art_lst, var_art_lst,
                                                     z_dyn_lst, dyn_cls_lst, mu_dyn_lst, var_dyn_lst,
-                                                    z_style, z_style_dist, cls_z_style_logits, cls_z_style_prob,
-                                                    mu_art_lst_hat, var_art_lst_hat, 
-                                                    mu_dyn_lst_hat, var_dyn_lst_hat,
-                                                    art_cls_lst_hat, dyn_cls_lst_hat,
+                                                    z_style, z_style_dist, cls_z_style_logits, cls_z_style_prob, composer_cls,
+                                                    z_art_lst_hat, z_dyn_lst_hat,
                                                     step=step_sup,
                                                     is_sup=True, emotion_cls=emotion_cls)
 
@@ -218,7 +198,6 @@ def training():
                               
             train_sup_writer.add_scalar('Recon', recon_loss.item(), global_step=step_sup)
             train_sup_writer.add_scalar('KL Sup', kl_loss.item(), global_step=step_sup)
-            train_sup_writer.add_scalar('KL Hat Sup', kl_loss_hat.item(), global_step=step_sup)
             train_sup_writer.add_scalar('KL Style', kl_style_loss.item(), global_step=step_sup)
             train_sup_writer.add_scalar('Entropy', h_q_style.item(), global_step=step_sup)
             train_sup_writer.add_scalar('CLF Art Loss', cls_art_loss.item(), global_step=step_sup)
@@ -240,7 +219,7 @@ def training():
 
         for i, x in enumerate(val_s_dl):
             
-            audio, onset_pr, frame_pr, emotion_cls = x     # (b, 320000), (b, t=625, 88)
+            audio, onset_pr, frame_pr, emotion_cls, composer_cls = x     # (b, 320000), (b, t=625, 88)
             # pr = torch.cat([onset_pr, frame_pr], dim=-1)
             pr = onset_pr
             melspec = torch.transpose(wav_to_melspec(audio), 1, 2)[:, :-1, :]   # (b, 625, 128)
@@ -258,18 +237,15 @@ def training():
             melspec_hat, z_art_lst, art_cls_lst, mu_art_lst, var_art_lst, \
                     z_dyn_lst, dyn_cls_lst, mu_dyn_lst, var_dyn_lst, \
                     z_style, z_style_dist, cls_z_style_logits, cls_z_style_prob, \
-                    mu_art_lst_hat, var_art_lst_hat, mu_dyn_lst_hat, var_dyn_lst_hat, \
-                    art_cls_lst_hat, dyn_cls_lst_hat = model(melspec, pr)
+                    z_art_lst_hat, z_dyn_lst_hat = model(melspec, pr)
             
             loss, recon_loss, kl_loss, cls_art_loss, clf_art_acc, cls_dyn_loss, clf_dyn_acc, \
-                kl_loss_hat, cls_art_hat_loss, clf_art_hat_acc, cls_dyn_hat_loss, clf_dyn_hat_acc, \
-                kl_style_loss, h_q_style = loss_function(melspec_hat, melspec, 
+                cls_art_hat_loss, clf_art_hat_acc, cls_dyn_hat_loss, clf_dyn_hat_acc, \
+                kl_style_loss, h_q_style= loss_function(melspec_hat, melspec, 
                                                     z_art_lst, art_cls_lst, mu_art_lst, var_art_lst,
                                                     z_dyn_lst, dyn_cls_lst, mu_dyn_lst, var_dyn_lst,
-                                                    z_style, z_style_dist, cls_z_style_logits, cls_z_style_prob,
-                                                    mu_art_lst_hat, var_art_lst_hat, 
-                                                    mu_dyn_lst_hat, var_dyn_lst_hat,
-                                                    art_cls_lst_hat, dyn_cls_lst_hat,
+                                                    z_style, z_style_dist, cls_z_style_logits, cls_z_style_prob, composer_cls,
+                                                    z_art_lst_hat, z_dyn_lst_hat,
                                                     step=step_sup,
                                                     is_sup=True, emotion_cls=emotion_cls)
             
@@ -288,7 +264,7 @@ def training():
             eval_kl_style_loss += kl_style_loss.item() / len(val_s_dl)
             eval_entropy_style += h_q_style.item() / len(val_s_dl)
 
-
+        print("", end="\r")
         print('''Sup Eval: Recon: {:.4} | CLF Art Loss: {:.4} | Art Acc: {:.4} | CLF Dyn Loss: {:.4} | Dyn Acc: {:.4} | CLF Art Hat Loss: {:.4} | Art Acc Hat: {:.4} | CLF Dyn Hat Loss: {:.4} | Dyn Acc Hat: {:.4}'''.format(
                 eval_recon_loss, eval_cls_art_loss, eval_cls_art_acc, eval_cls_dyn_loss, eval_cls_dyn_acc,
                 eval_cls_art_hat_loss, eval_cls_art_hat_acc, eval_cls_dyn_hat_loss, eval_cls_dyn_hat_acc))
@@ -316,7 +292,7 @@ def training():
 
         if ep % 10 == 0:
             # plot spectrograms
-            audio, onset_pr, frame_pr, emotion_cls = train_s_ds[10]
+            audio, onset_pr, frame_pr, emotion_cls, composer_cls = train_s_ds[10]
             pr_visualize = onset_pr + frame_pr
             # pr = torch.cat([onset_pr, frame_pr], dim=-1)
             pr = onset_pr
@@ -335,8 +311,7 @@ def training():
             melspec_hat, z_art_lst, art_cls_lst, mu_art_lst, var_art_lst, \
                     z_dyn_lst, dyn_cls_lst, mu_dyn_lst, var_dyn_lst, \
                     z_style, z_style_dist, cls_z_style_logits, cls_z_style_prob, \
-                    mu_art_lst_hat, var_art_lst_hat, mu_dyn_lst_hat, var_dyn_lst_hat, \
-                    art_cls_lst_hat, dyn_cls_lst_hat = model(melspec, pr)
+                    z_art_lst_hat, z_dyn_lst_hat = model(melspec, pr)
             
             if args["melspec_mode"] == "log":
                 melspec_hat_denorm = torch.exp(melspec_hat).cuda().T.squeeze()
@@ -372,9 +347,10 @@ def training():
             # plot latent space for style
             z_style_lst = []
             cls_style_lst = []
+            actual_cls_style_lst = []
 
             for i, x_temp in tqdm(enumerate(train_s_dl), total=len(train_s_dl), desc='Running latents on train set:'):
-                audio, onset_pr, frame_pr, emotion_cls = x_temp
+                audio, onset_pr, frame_pr, emotion_cls, composer_cls = x_temp
                 pr_visualize = onset_pr + frame_pr
                 pr = onset_pr
                 melspec = torch.transpose(wav_to_melspec(audio), 1, 2)[:, :-1, :]   # (b, 625, 128)
@@ -393,14 +369,15 @@ def training():
                 melspec_hat, z_art_lst, art_cls_lst, mu_art_lst, var_art_lst, \
                     z_dyn_lst, dyn_cls_lst, mu_dyn_lst, var_dyn_lst, \
                     z_style, z_style_dist, cls_z_style_logits, cls_z_style_prob, \
-                    mu_art_lst_hat, var_art_lst_hat, mu_dyn_lst_hat, var_dyn_lst_hat, \
-                    art_cls_lst_hat, dyn_cls_lst_hat = model(melspec, pr)
+                    z_art_lst_hat, z_dyn_lst_hat = model(melspec, pr)
                 
                 z_style_lst.append(z_style.cpu().detach())
                 cls_style_lst.append(torch.argmax(cls_z_style_prob, dim=-1).squeeze().cpu().detach())
+                actual_cls_style_lst.append(composer_cls.cpu().detach())
             
             z_style_lst = torch.cat(z_style_lst, dim=0).numpy()
             cls_style_lst = torch.cat(cls_style_lst, dim=0).cpu().detach().numpy()
+            actual_cls_style_lst = torch.cat(actual_cls_style_lst, dim=0).cpu().detach().numpy()
 
             from sklearn.manifold import TSNE
             import seaborn as sns
@@ -414,6 +391,12 @@ def training():
             fig = plt.figure(figsize=(8,8))
             sns.scatterplot(tsne_features[:,0], tsne_features[:,1], palette=palette, hue=color, legend='full')
             train_unsup_writer.add_figure('tsne_z_style', fig, global_step=step_sup, close=True)
+
+            color = actual_cls_style_lst
+            palette = sns.color_palette("bright", len(set(color)))
+            fig = plt.figure(figsize=(8,8))
+            sns.scatterplot(tsne_features[:,0], tsne_features[:,1], palette=palette, hue=color, legend='full')
+            train_unsup_writer.add_figure('tsne_z_style_actual', fig, global_step=step_sup, close=True)
             print("Plotting TSNE...done.")
 
 
@@ -431,6 +414,7 @@ if __name__ == "__main__":
     save_path += '_{}'.format(args["percent"])
 
     NUM_EMOTIONS = 2
+    NUM_STYLES = 4
     MELSPEC_DIM = 80
     PR_DIM = 88
 
@@ -496,7 +480,7 @@ if __name__ == "__main__":
     # test_emotion_dl = DataLoader(test_emotion_ds, batch_size=args["batch_size"] // 4, shuffle=False, num_workers=0)
 
     # load model
-    model = NMSLatentDisentangledStyle(n_component=NUM_EMOTIONS, n_style=4)
+    model = NMSLatentDisentangledStyleV2(n_component=NUM_EMOTIONS, n_style=4)
     model.cuda()
     optimizer = optim.Adam(model.parameters(), lr=args['lr'], betas=(0.9, 0.98), eps=1e-9)
 
@@ -505,8 +489,8 @@ if __name__ == "__main__":
 
     # load writers
     current_time = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
-    train_log_dir = 'logs/'+args['name']+'_style_v1/'+current_time+'/train'
-    eval_log_dir = 'logs/'+args['name']+'_style_v1/'+current_time+'/eval'
+    train_log_dir = 'logs/'+args['name']+'_style_v2/'+current_time+'/train'
+    eval_log_dir = 'logs/'+args['name']+'_style_v2/'+current_time+'/eval'
     train_unsup_writer = SummaryWriter(train_log_dir + "_unsup")
     train_sup_writer = SummaryWriter(train_log_dir + "_sup")
     eval_unsup_writer = SummaryWriter(eval_log_dir + "_unsup")

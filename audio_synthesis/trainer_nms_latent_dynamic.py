@@ -647,7 +647,7 @@ if __name__ == "__main__":
     # test_emotion_dl = DataLoader(test_emotion_ds, batch_size=args["batch_size"] // 4, shuffle=False, num_workers=0)
 
     # load model
-    model = NMSLatentDisentangledDynamic(n_component=NUM_EMOTIONS)
+    model = NMSLatentDisentangledDynamicV2(n_component=NUM_EMOTIONS)
     model.cuda()
     optimizer = optim.Adam(model.parameters(), lr=args['lr'], betas=(0.9, 0.98), eps=1e-9)
 

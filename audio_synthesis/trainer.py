@@ -88,6 +88,45 @@ class CustomSchedule:
         self._step = state_dict["steps"]
         self._rate = state_dict["rate"]
 
+
+class Normalizer():
+    """This class is for normalizing the spectrograms batch by batch. The normalization used is min-max, two modes 'framewise' and 'imagewise' can be selected. In this paper, we found that 'imagewise' normalization works better than 'framewise'"""
+    def __init__(self, mode='framewise'):
+
+        self.min_max_mean = None
+        if mode == 'framewise':
+            def normalize(x):
+                size = x.shape
+                x_max = x.max(1, keepdim=True)[0] # Finding max values for each frame
+                x_min = x.min(1, keepdim=True)[0]  
+                output = (x-x_min)/(x_max-x_min) # If there is a column with all zero, nan will occur
+                output[torch.isnan(output)]=0 # Making nan to 0
+                return output
+        elif mode == 'imagewise':
+            def normalize(x):
+                size = x.shape
+                x_max = x.view(size[0], size[1]*size[2]).max(1, keepdim=True)[0]
+                x_min = x.view(size[0], size[1]*size[2]).min(1, keepdim=True)[0]
+                if self.min_max_mean is None:
+                    self.min_max_mean = (x_min.mean(), x_max.mean())
+                else:
+                    self.min_max_mean = ((self.min_max_mean[0] + x_min.mean()) / 2, \
+                                        (self.min_max_mean[1] + x_max.mean()) / 2)
+                
+                x_max = x_max.unsqueeze(1) # Make it broadcastable
+                x_min = x_min.unsqueeze(1) # Make it broadcastable 
+                return (x-x_min)/(x_max-x_min+1e-15)
+        else:
+            print('please choose the correct mode')
+        self.normalize = normalize
+
+    def transform(self, x):
+        return self.normalize(x)
+    
+    def save_minmax(self):
+        torch.save(self.min_max_mean, "normalizer.pt")
+
+
 # load model
 model = PianoTacotron(melspec_dim=MELSPEC_DIM, pr_dim=PR_DIM,
                         prenet_sizes=[256, 128], 
@@ -107,7 +146,8 @@ model.cuda()
 optimizer = optim.Adam(model.parameters(), lr=args['lr'], betas=(0.9, 0.98), eps=1e-9)
 scheduler = CustomSchedule(args["transformer_model_dim"], optimizer=optimizer, warmup_steps=8000,
                             name="noam")
-wav_to_melspec = Spectrogram.MelSpectrogram()
+wav_to_melspec = Spectrogram.MelSpectrogram(sr=16000)
+normalizer = Normalizer(mode="imagewise")
 
 # load writers
 current_time = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
@@ -181,7 +221,7 @@ def training():
 
             audio, onset_pr = x     # (b, 320000), (b, t=625, 88)
             melspec = torch.transpose(wav_to_melspec(audio), 1, 2)[:, :-1, :]   # (b, 625, 128)
-            melspec, onset_pr = melspec.cuda(), onset_pr.cuda()
+            melspec, onset_pr = normalizer.transform(torch.log(melspec + 1e-12)).cuda(), onset_pr.cuda()
             melspec_hat, z_s_prob, z_u_dist, z_s_dist = model(melspec, onset_pr, is_sup=False, z_s=None)
 
             loss, recon_loss, kl_lat_unsup, kld_lat_sup, kld_cls = loss_function(melspec_hat, melspec, z_s_prob, 
@@ -215,7 +255,7 @@ def training():
             
             audio, onset_pr = x     # (b, 320000), (b, t=625, 88)
             melspec = torch.transpose(wav_to_melspec(audio), 1, 2)[:, :-1, :]   # (b, 625, 128)
-            melspec, onset_pr = melspec.cuda(), onset_pr.cuda()
+            melspec, onset_pr = normalizer.transform(torch.log(melspec + 1e-12)).cuda(), onset_pr.cuda()
             melspec_hat, z_s_prob, z_u_dist, z_s_dist = model(melspec, onset_pr, is_sup=False, z_s=None)
 
             loss, recon_loss, kl_lat_unsup, kld_lat_sup, kld_cls = loss_function(melspec_hat, melspec, z_s_prob, 
@@ -252,7 +292,7 @@ def training():
             emotion_label_oh[torch.arange(emotion_label.shape[0]), emotion_label] = 1
 
             melspec, onset_pr, emotion_label, emotion_label_oh \
-                = melspec.cuda(), onset_pr.cuda(), emotion_label.cuda(), emotion_label_oh.cuda()
+                = normalizer.transform(torch.log(melspec + 1e-12)).cuda(), onset_pr.cuda(), emotion_label.cuda(), emotion_label_oh.cuda()
             melspec_hat, z_s_prob, z_u_dist, z_s_dist = model(melspec, onset_pr, is_sup=True, z_s=emotion_label)
 
             loss, recon_loss, kl_lat_unsup, kl_lat_sup, clf_loss, clf_acc = loss_function(melspec_hat, melspec, z_s_prob, 
@@ -294,7 +334,7 @@ def training():
             emotion_label_oh[torch.arange(emotion_label.shape[0]), emotion_label] = 1
 
             melspec, onset_pr, emotion_label, emotion_label_oh \
-                = melspec.cuda(), onset_pr.cuda(), emotion_label.cuda(), emotion_label_oh.cuda()
+                = normalizer.transform(torch.log(melspec + 1e-12)).cuda(), onset_pr.cuda(), emotion_label.cuda(), emotion_label_oh.cuda()
             melspec_hat, z_s_prob, z_u_dist, z_s_dist = model(melspec, onset_pr, is_sup=True, z_s=emotion_label)
 
             loss, recon_loss, kl_lat_unsup, kl_lat_sup, clf_loss, clf_acc = loss_function(melspec_hat, melspec, z_s_prob, 
