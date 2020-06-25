@@ -1,8 +1,0 @@
-.gitignore
-.ipynb_checkpoints/
-__pycache__/
-data/
-logs/
-logs-baseline/
-params/
-params-baseline/
