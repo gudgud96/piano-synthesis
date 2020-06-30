@@ -617,14 +617,11 @@ if __name__ == "__main__":
     # test_s_dl = DataLoader(test_s_ds, batch_size=args["batch_size"], shuffle=False, num_workers=0)
 
     # load all data
-    train_s_ds = MAESTRO(path='/data/MAESTRO', groups=['train_all'], sequence_length=320000,
-                performance_style_dict=None)
+    train_s_ds = MAESTRO(path='/data/MAESTRO', groups=['train_all'], sequence_length=320000)
     train_s_dl = DataLoader(train_s_ds, batch_size=args["batch_size"], shuffle=True, num_workers=0)
-    val_s_ds = MAESTRO(path='/data/MAESTRO', groups=['validation_all'], sequence_length=320000,
-                performance_style_dict=None)
+    val_s_ds = MAESTRO(path='/data/MAESTRO', groups=['validation_all'], sequence_length=320000)
     val_s_dl = DataLoader(val_s_ds, batch_size=args["batch_size"], shuffle=False, num_workers=0)
-    test_s_ds = MAESTRO(path='/data/MAESTRO', groups=['test_all'], sequence_length=320000,
-                performance_style_dict=None)
+    test_s_ds = MAESTRO(path='/data/MAESTRO', groups=['test_all'], sequence_length=320000)
     test_s_dl = DataLoader(test_s_ds, batch_size=args["batch_size"], shuffle=False, num_workers=0)
 
     # load model
