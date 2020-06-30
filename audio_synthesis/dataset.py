@@ -339,7 +339,6 @@ class MAESTRO(PianoRollAudioDataset):
     def __init__(self, path='../../MAESTRO/', groups=None, sequence_length=None, seed=42, refresh=False, device=DEFAULT_DEVICE):
 
         super().__init__(path, groups if groups is not None else ['train'], sequence_length, seed, refresh, device)
-        self.var_threshold = var_threshold
 
     def available_groups(self):
         return ["train", "validation", "test", "train_emotion", "validation_emotion", "test_emotion",
