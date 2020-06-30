@@ -76,8 +76,8 @@ class PianoRollAudioDataset(Dataset):
         result['onset'] = (result['label'] == 3).float()
         result['offset'] = (result['label'] == 1).float()
         result['frame'] = (result['label'] > 1).float()
-        result['year'] = data['year']
-        result['composer'] = data['composer']
+        # result['year'] = data['year']
+        # result['composer'] = data['composer']
         # result['pedalling'] = data['pedalling']
         # result['velocity_2'] = data['velocity_2']         # this is velocity that we inferred
 
@@ -218,14 +218,14 @@ class PianoRollAudioDataset(Dataset):
             saved_results = torch.load(saved_data_path)
             maestro_entry = new_maestro_dataset[audio_path.replace("/data/MAESTRO/", "")]
             
-            # add in years
-            years_dict = [2004, 2006, 2008, 2009, 2011, 2013, 2014, 2015, 2017, 2018]
-            saved_results["year"] = years_dict.index(maestro_entry["year"])
+            # # add in years
+            # years_dict = [2004, 2006, 2008, 2009, 2011, 2013, 2014, 2015, 2017, 2018]
+            # saved_results["year"] = years_dict.index(maestro_entry["year"])
             
-            composer_dict = torch.load("data/composer_dict.pt")
-            composer = maestro_entry["canonical_composer"]
-            if "/" in composer: composer = composer.split("/")[0].rstrip()
-            saved_results["composer"] = composer_dict[composer]
+            # composer_dict = torch.load("data/composer_dict.pt")
+            # composer = maestro_entry["canonical_composer"]
+            # if "/" in composer: composer = composer.split("/")[0].rstrip()
+            # saved_results["composer"] = composer_dict[composer]
 
             return saved_results
         
