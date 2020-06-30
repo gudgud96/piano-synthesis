@@ -7,5 +7,6 @@
     "input_dims": 80,
     "hidden_dims": 256,
     "z_dims": 64,
-    "n_component": 2
+    "n_component": 2,
+    "hop_size": 512
 }

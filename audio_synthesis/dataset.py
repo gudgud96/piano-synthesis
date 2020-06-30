@@ -76,12 +76,8 @@ class PianoRollAudioDataset(Dataset):
         result['onset'] = (result['label'] == 3).float()
         result['offset'] = (result['label'] == 1).float()
         result['frame'] = (result['label'] > 1).float()
-        # result['year'] = data['year']
-        # result['composer'] = data['composer']
-        # result['pedalling'] = data['pedalling']
-        # result['velocity_2'] = data['velocity_2']         # this is velocity that we inferred
 
-        # prepare velocity label
+        # prepare velocity label (related to dynamics)
         velocity_label = np.sum(result['velocity'].cpu().numpy(), axis=-1)
         velocity_counter = result['velocity'].cpu().numpy().copy()
         velocity_counter[velocity_counter > 0] = 1
@@ -103,9 +99,10 @@ class PianoRollAudioDataset(Dataset):
         # for onset piano roll, change all onsets to 1
         result['onset'][result['onset'] > 0] = 1
 
+        # prepare articulation label
         frame_label = np.sum(result['frame'].cpu().numpy(), axis=-1)
         onset_label = np.sum(result['onset'].cpu().numpy(), axis=-1)
-        frame_label_2 = frame_label - onset_label
+        frame_label_2 = frame_label - onset_label   # do not include onset label
         frame_label[frame_label > 0] = 1
         frame_label_2[frame_label_2 > 0] = 1
 
@@ -117,61 +114,9 @@ class PianoRollAudioDataset(Dataset):
                     frame_label_new[i] = 0
                 if frame_label_2[i - 1] == 1 and frame_label_2[i + 1] == 1:
                     frame_label_new[i] = 1
-
-        def get_average_values(lst):
-            temp = []
-            for elem in lst:
-                temp += elem
-            
-            if temp:
-                return sum(temp) / len(temp)
-            else:
-                return 0
-        
-        def get_dynamic_lst(lst):
-            cur = 0
-            temp = []
-            for elem in lst:
-                if len(elem) > 0:
-                    temp.append(sum(elem) / len(elem))
-                    cur = sum(elem) / len(elem)
-                else:
-                    temp.append(cur)
-            return temp
-
-        # duration_lst, velocity_lst = data["duration"], data["velocity_2"]
-        # duration_lst, velocity_lst = np.array(duration_lst), np.array(velocity_lst)
-
-        # duration, velocity = get_dynamic_lst(duration_lst[step_begin:step_end]), \
-        #                     get_dynamic_lst(velocity_lst[step_begin:step_end])
-
-        # for i in range(len(duration)):
-        #     if duration[i] > 0.12:
-        #         duration[i] = 1
-        #     else:
-        #         duration[i] = 0
-        
-        # for i in range(len(velocity)):
-        #     if velocity[i] > 0.55:
-        #         velocity[i] = 1
-        #     else:
-        #         velocity[i] = 0
-        
-        # while len(duration) < step_end - step_begin:
-        #     duration.append(0)
-        # while len(velocity) < step_end - step_begin:
-        #     velocity.append(0)
         
         duration, velocity = torch.Tensor(frame_label_new), torch.Tensor(velocity_label_average_new)
-
-        # get emotion dict
-        if "emotion_dict" in data:
-            result['emotion_dict'] = data['emotion_dict']
-            emotion_vector = torch.Tensor([data['emotion_dict']['res']['energy'], 
-                                            data['emotion_dict']['res']['valence']])
-            return result['audio'], result['onset'], result['frame'], (duration, velocity)
-        else:
-            return result['audio'], result['onset'], result['frame'], (duration, velocity)
+        return result['audio'], result['onset'], result['frame'], (duration, velocity)
 
     def __len__(self):
         return len(self.data)
@@ -209,7 +154,7 @@ class PianoRollAudioDataset(Dataset):
                 a matrix that contains MIDI velocity values at the frame locations
         """
 
-        new_maestro_dataset = self._create_maestro_and_emotion_dataset()
+        new_maestro_dataset = self._create_maestro_dataset()
 
         saved_data_path = audio_path.replace('.flac', '.pt').replace('.wav', '.pt')
         
@@ -217,15 +162,6 @@ class PianoRollAudioDataset(Dataset):
             # Check if .pt files exist, if so just load the files
             saved_results = torch.load(saved_data_path)
             maestro_entry = new_maestro_dataset[audio_path.replace("/data/MAESTRO/", "")]
-            
-            # # add in years
-            # years_dict = [2004, 2006, 2008, 2009, 2011, 2013, 2014, 2015, 2017, 2018]
-            # saved_results["year"] = years_dict.index(maestro_entry["year"])
-            
-            # composer_dict = torch.load("data/composer_dict.pt")
-            # composer = maestro_entry["canonical_composer"]
-            # if "/" in composer: composer = composer.split("/")[0].rstrip()
-            # saved_results["composer"] = composer_dict[composer]
 
             return saved_results
         
@@ -264,72 +200,13 @@ class PianoRollAudioDataset(Dataset):
             torch.save(data, saved_data_path)
             return data
     
-    def _create_maestro_and_emotion_dataset(self):
+    def _create_maestro_dataset(self):
         # create maestro dataset with audio filename as key
         with open("/data/MAESTRO/maestro-v2.0.0.json", "r+") as f:
             maestro_dataset = json.load(f)
         new_maestro_dataset = {}
         for m in maestro_dataset:
             new_maestro_dataset[m["audio_filename"]] = m
-
-        # create emotion annotation dataset with q_composer + q_title as key
-        # if os.path.exists("data/final_yamaha_emotion_v3.json"):
-        #     with open("data/final_yamaha_emotion_v3.json", "r+") as f:
-        #         new_emotion_dataset = json.load(f)
-        
-        # else:
-        # print("Collecting new dictionary...")
-        # with open("data/filtered_yamaha_emotion.json", "r+") as f:
-        #     emotion_dataset = json.load(f)
-        # new_emotion_dataset = {}
-
-        # emotions = []
-
-        # for e in emotion_dataset:
-        #     # set classes: split energy and valence into 4 clusters
-        #     # if e["res"]["energy"] > 0.25 and e["res"]["valence"] > 0.25:
-        #     #     e["res"]["emotion_class"] = 0
-        #     # elif e["res"]["energy"] > 0.25 and e["res"]["valence"] <= 0.25:
-        #     #     e["res"]["emotion_class"] = 1
-        #     # elif e["res"]["energy"] <= 0.25 and e["res"]["valence"] <= 0.25:
-        #     #     e["res"]["emotion_class"] = 2
-        #     # elif e["res"]["energy"] <= 0.25 and e["res"]["valence"] > 0.25:
-        #     #     e["res"]["emotion_class"] = 3
-
-        #     # change between valence / arousal
-        #     # if e["res"]["energy"] <= 0.5:
-        #     #     e["res"]["emotion_class"] = 0
-        #     # else:
-        #     #     e["res"]["emotion_class"] = 1
-
-        #     # go around by circle - v3
-        #     if e["res"]["energy"] <= 0.2 and e["res"]["valence"] <= 0.2:
-        #         e["res"]["emotion_class"] = 0
-        #     elif e["res"]["energy"] <= 0.3 and e["res"]["valence"] <= 0.4:
-        #         e["res"]["emotion_class"] = 1
-        #     elif e["res"]["energy"] <= 0.4 and e["res"]["valence"] <= 0.6:
-        #         e["res"]["emotion_class"] = 2
-        #     else:
-        #         e["res"]["emotion_class"] = 3
-
-        #     new_emotion_dataset[e["q_composer"] + " " + e["q_title"]] = e
-        
-        # with open("data/final_yamaha_emotion_v3.json", "w+") as f:
-        #     json.dump(new_emotion_dataset, f)
-
-        # prepare the list of songs that have emotion annotations with it
-        # with open("data/emotion_data_v3.txt", "w+") as f:
-        #     temp_set = set()
-        #     for audio_filename in new_maestro_dataset.keys():
-        #         if new_maestro_dataset[audio_filename]["canonical_composer"] + " " \
-        #             + new_maestro_dataset[audio_filename]["canonical_title"] in new_emotion_dataset and \
-        #             new_maestro_dataset[audio_filename]["canonical_composer"] + " " \
-        #             + new_maestro_dataset[audio_filename]["canonical_title"] not in temp_set:
-                    
-        #             f.write("/data/MAESTRO/" + audio_filename + "\n")
-                    
-        #             temp_set.add(new_maestro_dataset[audio_filename]["canonical_composer"] + " " \
-        #             + new_maestro_dataset[audio_filename]["canonical_title"])
         
         return new_maestro_dataset
 
@@ -372,5 +249,4 @@ class MAESTRO(PianoRollAudioDataset):
                 np.savetxt(tsv_filename, midi, fmt='%.6f', delimiter='\t', header='onset,offset,note,velocity')
             result.append((audio_path, tsv_filename))
 
-    
         return result
