@@ -4,7 +4,6 @@ import numpy as np
 import math as m
 from torch.distributions import Normal
 from torch.nn import functional as F
-from layers import *
 from tqdm import tqdm
 import time
 

@@ -171,9 +171,9 @@ class PianoRollAudioDataset(Dataset):
             result['emotion_dict'] = data['emotion_dict']
             emotion_vector = torch.Tensor([data['emotion_dict']['res']['energy'], 
                                             data['emotion_dict']['res']['valence']])
-            return result['audio'], result['onset'], result['frame'], (duration, velocity), result['composer']
+            return result['audio'], result['onset'], result['frame'], (duration, velocity)
         else:
-            return result['audio'], result['onset'], result['frame'], (duration, velocity), result['composer']
+            return result['audio'], result['onset'], result['frame'], (duration, velocity)
 
     def __len__(self):
         return len(self.data)

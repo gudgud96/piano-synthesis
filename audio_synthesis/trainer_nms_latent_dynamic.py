@@ -579,8 +579,8 @@ if __name__ == "__main__":
     if not os.path.isdir('logs'):
         os.mkdir('logs')
     save_path = 'params/{}_{}.pt'.format(args['name'], datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
-    save_path += '_{}'.format(args["melspec_mode"])
-    save_path += '_{}'.format(args["percent"])
+    # save_path += '_{}'.format(args["melspec_mode"])
+    # save_path += '_{}'.format(args["percent"])
 
     NUM_EMOTIONS = args["n_component"]
     MELSPEC_DIM = args["input_dims"]
