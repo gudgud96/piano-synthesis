@@ -1,6 +1,3 @@
-# Adapting Raven Cheuk's MAESTRO dataloader for transcription tasks.
-# Modified with emotion labels reading.
-
 import json
 import os
 from abc import abstractmethod
@@ -46,9 +43,9 @@ class PianoRollAudioDataset(Dataset):
         self.data = []
 
         for group in groups:
-            for input_files in tqdm(self.files(group), desc='Loading group %s' % group): #self.files is defined in MAPS class
+            for input_files in tqdm(self.files(group), desc='Loading group %s' % group): 
                 # torch.save(input_files, 'input_files')
-                self.data.append(self.load(*input_files)) # self.load is a function defined below. It first loads all data into memory first
+                self.data.append(self.load(*input_files))
     
     def __getitem__(self, index):
         data = self.data[index]
@@ -213,13 +210,12 @@ class PianoRollAudioDataset(Dataset):
 
 class MAESTRO(PianoRollAudioDataset):
 
-    def __init__(self, path='../../MAESTRO/', groups=None, sequence_length=None, seed=42, refresh=False, device=DEFAULT_DEVICE):
+    def __init__(self, path='/data/MAESTRO/', groups=None, sequence_length=None, seed=42, refresh=False, device=DEFAULT_DEVICE):
 
         super().__init__(path, groups if groups is not None else ['train'], sequence_length, seed, refresh, device)
 
     def available_groups(self):
-        return ["train", "validation", "test", "train_emotion", "validation_emotion", "test_emotion",
-                "train_all", "validation_all", "test_all"]
+        return ["train_all", "validation_all", "test_all"]
 
     def files(self, group):
         metadata = json.load(open(os.path.join(self.path, 'maestro-v2.0.0.json')))

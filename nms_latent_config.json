@@ -4,7 +4,7 @@
     "batch_size": 64,
     "lr": 0.002,
     "melspec_mode": "log-minmax",
-    "input_dims": 80,
+    "input_dims": 128,
     "hidden_dims": 256,
     "z_dims": 64,
     "n_component": 2,

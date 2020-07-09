@@ -122,6 +122,22 @@ def training():
             audio, onset_pr, frame_pr, labels = x     # (b, 320000), (b, t=625, 88)
             pr = onset_pr
             melspec = torch.transpose(wav_to_melspec(audio), 1, 2)[:, :-1, :]   # (b, 625, 128)
+            
+            # super-resolute if necessary (for hop-size < 512)
+            melspec_steps = melspec.shape[1]
+            if pr.shape[1] < melspec_steps:     
+                labels = (torch.repeat_interleave(labels[0], int(melspec_steps // pr.shape[1]), dim=-1),
+                        torch.repeat_interleave(labels[1], int(melspec_steps // pr.shape[1]), dim=-1))
+                pr = torch.repeat_interleave(pr, int(melspec_steps // pr.shape[1]), dim=1)
+
+                # mask repeat values for onset pr
+                mask = torch.zeros_like(pr)
+                for j in range(mask.shape[1]):
+                    if j % int(melspec_steps // pr.shape[1]) == 0:
+                        mask[:, j, :] = 1
+                    else:
+                        mask[:, j, :] = 0
+                pr = pr * mask
 
             # use log melspec
             pr = pr.cuda()
@@ -168,6 +184,22 @@ def training():
             audio, onset_pr, frame_pr, labels = x     # (b, 320000), (b, t=625, 88)
             pr = onset_pr
             melspec = torch.transpose(wav_to_melspec(audio), 1, 2)[:, :-1, :]   # (b, 625, 128)
+
+            # super-resolute if necessary (for hop-size < 512)
+            melspec_steps = melspec.shape[1]
+            if pr.shape[1] < melspec_steps:     
+                labels = (torch.repeat_interleave(labels[0], int(melspec_steps // pr.shape[1]), dim=-1),
+                        torch.repeat_interleave(labels[1], int(melspec_steps // pr.shape[1]), dim=-1))
+                pr = torch.repeat_interleave(pr, int(melspec_steps // pr.shape[1]), dim=1)
+
+                # mask repeat values for onset pr
+                mask = torch.zeros_like(pr)
+                for j in range(mask.shape[1]):
+                    if j % int(melspec_steps // pr.shape[1]) == 0:
+                        mask[:, j, :] = 1
+                    else:
+                        mask[:, j, :] = 0
+                pr = pr * mask
             
             # use log melspec
             pr = pr.cuda()
@@ -214,13 +246,29 @@ def training():
                 p['lr'] = args["lr"] / lr_factor
             lr_factor *= 2
 
-        if ep % 1 == 0:
+        if ep % 10 == 0:
             # plot spectrograms
             audio, onset_pr, frame_pr, labels = train_s_ds[10]  # randonly pick one for inspection
             pr_visualize = onset_pr + frame_pr
             pr = onset_pr
             melspec = torch.transpose(wav_to_melspec(audio), 1, 2)[:, :-1, :]   # (b, 625, 128)
             melspec_original = wav_to_melspec(audio)
+
+            # super-resolute if necessary (for hop-size < 512)
+            melspec_steps = melspec.shape[1]
+            if pr.shape[1] < melspec_steps:     
+                labels = (torch.repeat_interleave(labels[0], int(melspec_steps // pr.shape[1]), dim=-1),
+                        torch.repeat_interleave(labels[1], int(melspec_steps // pr.shape[1]), dim=-1))
+                pr = torch.repeat_interleave(pr, int(melspec_steps // pr.shape[0]), dim=0)
+
+                # mask repeat values for onset pr
+                mask = torch.zeros_like(pr)
+                for j in range(mask.shape[0]):
+                    if j % int(melspec_steps // pr.shape[1]) == 0:
+                        mask[j, :] = 1
+                    else:
+                        mask[j, :] = 0
+                pr = pr * mask
             
             # use log melspec
             pr = pr.cuda().unsqueeze(0)
